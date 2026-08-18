@@ -52,8 +52,10 @@ def _frames(n=3):
 
 
 def _source():
+    # Neutral source metadata — the local/absolute input path is NEVER
+    # persisted in the research JSON (FIX 14).
     return {
-        "input_source": "demo_video.mp4",
+        "source_type": "local_video",
         "video_fps_hz": 30.0,
         "fps_used_hz": 30.0,
         "frames_read": 3,
@@ -153,10 +155,75 @@ class SessionExportTests(unittest.TestCase):
         )
         self.assertEqual(export["limitations"], ["a", "b"])
 
-    def test_no_pii_guard_triggers_on_sensitive_source(self):
+    def test_local_input_path_is_never_persisted(self):
+        # Even when console messages use the path, the JSON must be neutral.
+        export = build_session_export(
+            source=_source(), method_provenance=_provenance(),
+            quality_summary=_quality(), frames=_frames(),
+            session_descriptors=_descriptors(),
+            kimore_reference_analysis=_reference(), limitations=[],
+        )
+        text = json.dumps(export)
+        self.assertEqual(export["source"]["source_type"], "local_video")
+        self.assertNotIn("input_source", export["source"])
+        for leaked in ("C:\\", "/Users/", "demo_video.mp4", "patients/"):
+            self.assertNotIn(leaked, text)
+
+    def test_forbidden_key_raises_value_error(self):
+        bad_frames = _frames()
+        bad_frames[0]["metadata"]["patient_name"] = "anonymous"
+        with self.assertRaises(ValueError):
+            build_session_export(
+                source=_source(), method_provenance=_provenance(),
+                quality_summary=_quality(), frames=bad_frames,
+                session_descriptors=_descriptors(),
+                kimore_reference_analysis=_reference(), limitations=[],
+            )
+
+    def test_forbidden_key_nested_deep_raises_value_error(self):
         bad_source = dict(_source())
-        bad_source["input_source"] = "subject_name_scan.mp4"
-        with self.assertRaises(AssertionError):
+        bad_source["research_meta"] = {"owner": {"email": "x@y.z"}}
+        with self.assertRaises(ValueError):
+            build_session_export(
+                source=bad_source, method_provenance=_provenance(),
+                quality_summary=_quality(), frames=_frames(),
+                session_descriptors=_descriptors(),
+                kimore_reference_analysis=_reference(), limitations=[],
+            )
+
+    def test_forbidden_subject_id_key_raises_value_error(self):
+        bad_descriptors = dict(_descriptors())
+        bad_descriptors["subject_id"] = 12
+        with self.assertRaises(ValueError):
+            build_session_export(
+                source=_source(), method_provenance=_provenance(),
+                quality_summary=_quality(), frames=_frames(),
+                session_descriptors=bad_descriptors,
+                kimore_reference_analysis=_reference(), limitations=[],
+            )
+
+    def test_benign_scientific_text_containing_name_does_not_fail(self):
+        # Structural key-name validation: values are not substring-scanned,
+        # and non-forbidden key names such as "landmark_name" are allowed.
+        frames = _frames()
+        frames[0]["quality"]["landmark_name"] = "left_hip"
+        frames[0]["metadata"]["note"] = (
+            "the anatomical landmark name is stored verbatim"
+        )
+        frames[0]["primary_outcomes"]["left_knee_sagittal_deg"] = 90.5
+        export = build_session_export(
+            source=_source(), method_provenance=_provenance(),
+            quality_summary=_quality(), frames=frames,
+            session_descriptors=_descriptors(),
+            kimore_reference_analysis=_reference(), limitations=["ok"],
+        )
+        self.assertEqual(len(export["frames"]), 3)
+
+    def test_forbidden_key_check_uses_value_error_not_assert(self):
+        # Guard must not be an assert (asserts can be disabled under -O).
+        bad_source = dict(_source())
+        bad_source["patient"] = "id"
+        with self.assertRaises(ValueError):
             build_session_export(
                 source=bad_source, method_provenance=_provenance(),
                 quality_summary=_quality(), frames=_frames(),

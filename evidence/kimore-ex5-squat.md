@@ -20,17 +20,25 @@
 - KIMORE measures motor performance in physical rehabilitation with a
   **Kinect RGB-D sensor** providing high-confidence 3D skeletal coordinates.
 - Exercise 5 is a **squat** (repeated knee flexion/extension).
-- Clinical scores in KIMORE come from clinician assessments and validated
-  scales (e.g., Fugl-Meyer) — **not** automatically from the raw kinematics.
+- In KIMORE, exercise-performance scores are **clinician-derived** through the
+  Exercise Accuracy Assessment Questionnaire (EAAQ), a task-independent
+  assessment framework. The KIMORE paper notes the lack of validated clinical
+  tools specifically for rating individual therapeutic-exercise performance;
+  EAAQ was used as that assessment framework. EAAQ is not an externally
+  validated universal clinical scale and should not be overclaimed as one.
 
 ## BioGait adaptation context
 
 - BioGait uses **monocular RGB** inference via MediaPipe PoseLandmarker
   (`pose_landmarker_lite.task`), producing both normalized image landmarks and
-  **world landmarks** (metric, camera-centered).
+  **world landmarks** — real-world 3D coordinates in meters with the
+  **midpoint of the hips as the origin** (a MediaPipe convention, not a
+  camera-centered frame).
 - The research pipeline consumes **world landmarks** when available.
 - MediaPipe **WRIST is a proxy** for the KIMORE **Hand** joint; it is an
   ENGINEERING_ADAPTED proxy, not an exact kinematic Hand equivalent.
+- Kinect and MediaPipe axes/coordinate frames are **not** assumed to be
+  numerically equivalent.
 
 > **BioGait is KIMORE-informed rather than a direct KIMORE reproduction.
 > KIMORE uses Kinect-derived 3D skeletal measurements, whereas BioGait uses
@@ -41,8 +49,12 @@
 
 | KIMORE concept | BioGait implementation | Classification |
 |----------------|------------------------|----------------|
-| Sagittal knee angle | `kimore_sagittal_knee_angle_yz(hip, knee, ankle)` in the Y-Z plane, degrees; left and right share the same math | ENGINEERING_ADAPTED |
+| Sagittal knee angle | `kimore_reference_sagittal_knee_angle_yz(hip, knee, ankle)` — the exact reviewed Ex5 convention: `degrees(atan2(hip_y-knee_y, hip_z-knee_z) + atan2(knee_y-ankle_y, ankle_z-knee_z))` per side | ENGINEERING_ADAPTED (coordinate transfer) / REFERENCE_DERIVED (equation) |
 
+- The reference representation is **not** a clamped 0..180 vector angle and
+  is **not** converted into a conventional unsigned joint angle.
+- Degenerate (zero-length) hip-knee or knee-ankle segments yield `None`
+  (never a fake 0-degree measurement).
 - No correct/incorrect labels are produced.
 - Values are `None` (never 0) when evidence is unavailable; no fake
   measurements are generated.
@@ -61,25 +73,34 @@
 
 ## Filtering
 
-- **Reference (offline):** Butterworth, order 3, cutoff 1 Hz, sample rate
-  30 Hz, applied with `sosfiltfilt` (zero-phase, non-causal — the documented
-  SOS form of MATLAB/`scipy` `filtfilt`).
+- **Reference (offline):** Butterworth, order 3, cutoff 1 Hz, reference
+  sample rate 30 Hz, reproduced as `[b, a] = butter(order=3, cutoff=1 Hz,
+  fs=30 Hz)` + `filtfilt(b, a, x)` — zero-phase, non-causal.
   Classification: REFERENCE_DERIVED / OFFLINE ONLY / NON-CAUSAL.
+  The EXACT reference path only runs on a complete stream at 30 Hz.
 - **Causal adaptation:** `CausalKimoreButterworth` — stateful SOS filtering.
   Classification: ENGINEERING_ADAPTED. Not `filtfilt`-equivalent, introduces
-  phase delay, not clinically validated.
+  phase delay, not clinically validated; causal output does not equal
+  reference output.
 
 ## Reference temporal analysis
 
 Offline reference path describing the KIMORE Ex5 event-extraction convention:
 
 1. remove the initial 10 samples from the knee-angle stream;
-2. sign correction when a consecutive angle difference exceeds 100°;
-3. `filtfilt` reference filter;
+2. exact sign-flip correction (negate a sample when the consecutive angle
+   difference is below −100° or above +100° — NOT a ±360 unwrap);
+3. ba-form `filtfilt` reference filter (30 Hz, order 3, 1 Hz);
 4. maxima at `max(signal)/√2`;
 5. minima on `max(signal) − signal` at `max(transformed)/√2`;
 6. minimum peak distance `⌊n/10⌋`.
 
+- The EXACT path requires a complete (no missing samples) stream at the
+  30 Hz reference convention; otherwise it returns a structured warning
+  (`missing_samples_require_resampling` or
+  `reference_requires_30hz_or_resampling`) and does NOT run filtering/peak
+  detection. An ENGINEERING_ADAPTED path at the video's actual frame rate is
+  also reported and is never labelled REFERENCE_DERIVED.
 - Detected events are **candidate** repetition events — **not** clinically
   valid repetitions — and the path produces no pass/fail.
 - The KIMORE acquisition protocol involved repeated exercise execution; its
@@ -93,9 +114,12 @@ Classification: REFERENCE_DERIVED / OFFLINE / NOT REALTIME.
 - Session duration, effective sample rate.
 - Left/right knee ROM (max−min, degrees).
 - Left/right angular velocity (finite difference Δangle/Δt), peak and mean
-  absolute values.
+  absolute values. Intervals with a missing angle or non-increasing
+  timestamp are skipped — gaps are never bridged.
 - Left-right ROM difference.
-- Reference event-candidate count and candidate repetition durations.
+- Per-side reference maxima counts and per-side candidate repetition
+  durations; bilateral pairing is **deferred** (`bilateral_pairing_status:
+  "deferred"`). No combined/repetition union count is produced.
 
 These are **descriptive kinematics only** — not clinical risk, pass/fail,
 rehabilitation scores, or movement-quality scores.

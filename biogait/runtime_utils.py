@@ -12,6 +12,7 @@ It provides small, unit-testable primitives used by ui_worker.py:
 """
 from __future__ import annotations
 
+import math
 import platform
 import sys
 import time
@@ -262,3 +263,36 @@ def interruptible_sleep(seconds: float, should_stop: Callable[[], bool]) -> bool
         if remaining <= 0:
             return True
         time.sleep(min(SLEEP_CHUNK_SECONDS, remaining))
+
+
+# ── Source-video timeline (offline, deterministic) ────────────────────────────
+
+class SourceVideoTimeline:
+    """Deterministic source-video timeline helper (offline analysis).
+
+    Derives every timestamp from the SOURCE VIDEO frame rate:
+
+    - ``timestamp_seconds(frame_index) = frame_index / fps``
+    - ``video_timestamp_ms(frame_index)`` is the rounded millisecond
+      timestamp, guaranteed to be strictly increasing numerically.
+
+    It never uses processing wall-clock time as the video timeline. Processing
+    wall time remains appropriate only for runtime benchmarking, not for
+    source-video scientific timing.
+    """
+
+    def __init__(self, fps: float) -> None:
+        if not (math.isfinite(fps) and fps > 0):  # rejects 0, negative, NaN, inf
+            raise ValueError("fps must be a positive finite number")
+        self.fps = float(fps)
+        self._prev_ms = -1
+
+    def timestamp_seconds(self, frame_index: int) -> float:
+        return frame_index / self.fps
+
+    def video_timestamp_ms(self, frame_index: int) -> int:
+        """Millisecond VIDEO timestamp, strictly increasing per call sequence."""
+        ts_ms = round(self.timestamp_seconds(frame_index) * 1000)
+        ts_ms = max(ts_ms, self._prev_ms + 1)
+        self._prev_ms = ts_ms
+        return ts_ms

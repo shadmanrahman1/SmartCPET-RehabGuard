@@ -3,6 +3,10 @@
 Measures per-frame processing time for the MediaPipe PoseLandmarker pipeline
 on a local video. Only writes results when a real input video is supplied.
 
+Timing for MediaPipe VIDEO inference uses the deterministic source-video
+timeline (frame_index / fps), not the frame counter as fake milliseconds.
+Processing wall-clock time is used only for the throughput/latency report.
+
 Example:
     python experiments/biogait/benchmark_video.py --input path/to/video.mp4
     python experiments/biogait/benchmark_video.py --input path/to/video.mp4 ^
@@ -18,13 +22,16 @@ import statistics
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import cv2
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "biogait"))
+# Repo-level biogait/ must be importable regardless of invocation directory.
+_REPO_BIOGAIT = Path(__file__).resolve().parents[2] / "biogait"
+sys.path.insert(0, str(_REPO_BIOGAIT))
 
 from analyze_video import MODEL_PATH, _build_landmarker  # noqa: E402
+from runtime_utils import SourceVideoTimeline  # noqa: E402
 
 
 def _ensure_model() -> str:
@@ -33,7 +40,7 @@ def _ensure_model() -> str:
     return ensure()
 
 
-def benchmark(input_path: Path, output_path: Path) -> dict[str, Any]:
+def benchmark(input_path: Path, output_path: Optional[Path], fps_override: Optional[float]) -> dict[str, Any]:
     mp = __import__("mediapipe")
     model = _ensure_model()
     landmarker = _build_landmarker(model)
@@ -41,6 +48,19 @@ def benchmark(input_path: Path, output_path: Path) -> dict[str, Any]:
     cap = cv2.VideoCapture(str(input_path))
     if not cap.isOpened():
         raise RuntimeError(f"could not open video: {input_path}")
+
+    fps = float(cap.get(cv2.CAP_PROP_FPS))
+    fps_from_video = fps > 0 and fps == fps
+    if not fps_from_video:
+        if fps_override is None:
+            cap.release()
+            raise ValueError(
+                "invalid or missing video FPS metadata; provide an explicit "
+                "--fps override"
+            )
+        fps = float(fps_override)
+        fps_from_video = False
+    timeline = SourceVideoTimeline(fps)
 
     total_frames = 0
     valid_pose_frames = 0
@@ -57,7 +77,9 @@ def benchmark(input_path: Path, output_path: Path) -> dict[str, Any]:
                 t0 = time.perf_counter()
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-                result = landmarker.detect_for_video(img, total_frames + 1)
+                result = landmarker.detect_for_video(
+                    img, timeline.video_timestamp_ms(total_frames)
+                )
                 t1 = time.perf_counter()
 
                 total_frames += 1
@@ -73,7 +95,10 @@ def benchmark(input_path: Path, output_path: Path) -> dict[str, Any]:
 
     wall = time.perf_counter() - start
     results: dict[str, Any] = {
-        "input": str(input_path),
+        "source_type": "local_video",
+        "video_fps_hz": (round(fps, 4) if fps_from_video else None),
+        "fps_used_hz": round(fps, 4),
+        "fps_trusted_from_video": fps_from_video,
         "total_frames": total_frames,
         "valid_pose_frames": valid_pose_frames,
         "world_landmark_available_frames": world_available_frames,
@@ -101,20 +126,28 @@ def benchmark(input_path: Path, output_path: Path) -> dict[str, Any]:
     return results
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="benchmark_video",
         description="BioGait PoseLandmarker per-frame benchmark on a local video.",
     )
     parser.add_argument("--input", required=True, help="input video path")
     parser.add_argument("--output", default=None, help="optional JSON output path")
+    parser.add_argument("--fps", type=float, default=None,
+                        help="override video frame rate (Hz; required if video "
+                             "FPS metadata is invalid)")
+    return parser
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    parser = _build_parser()
     args = parser.parse_args(argv)
 
     if not Path(args.input).exists():
         print(f"[benchmark_video] ERROR: input does not exist: {args.input}")
         return 1
     try:
-        benchmark(Path(args.input), Path(args.output) if args.output else None)
+        benchmark(Path(args.input), Path(args.output) if args.output else None, args.fps)
     except Exception as exc:
         print(f"[benchmark_video] ERROR: {type(exc).__name__}: {exc}")
         return 1

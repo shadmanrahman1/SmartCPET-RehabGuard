@@ -12,8 +12,15 @@ Example:
         --input path/to/video.mp4 ^
         --output path/to/session.json
 
+Timing is deterministic on the SOURCE VIDEO TIMELINE (frame_index / fps);
+processing wall-clock time is never used as the scientific video timeline.
+
 IMPORTANT: this is an OFFLINE research/experiment path. Results are
 descriptive and reference-derived; they are not a clinical assessment.
+The exact KIMORE reference path requires a complete 30 Hz stream; when the
+video frame rate differs or samples are missing it returns a structured
+warning. An ENGINEERING_ADAPTED path at the actual frame rate is also
+reported.
 """
 from __future__ import annotations
 
@@ -28,18 +35,19 @@ from typing import Any, Optional
 
 import cv2
 
-# MediaPipe is imported lazily below because it is a heavy runtime dependency
-# not required to *parse* this module (kept importable in lightweight CI).
+# Heavy runtime dependencies (cv2, mediapipe) are imported lazily below so the
+# module stays importable in lightweight CI for argument/parse checks.
 from metrics import add_session_fields, calculate_pose_metrics, no_pose_metrics
-from runtime_utils import MonotonicClock
+from runtime_utils import SourceVideoTimeline
 from evidence_features import (
     build_frame_evidence,
     extract_normalized_landmarks,
     extract_world_landmarks,
 )
 from reference_temporal import (
+    kimore_adapted_ex5_temporal_analysis,
     kimore_reference_ex5_temporal_analysis,
-    merge_side_events,
+    side_event_summary,
 )
 from session_analysis import (
     SessionAccumulator,
@@ -58,8 +66,8 @@ METHOD_PROVENANCE = {
         "classification": "ENGINEERING_ADAPTED",
         "reference": "Capecci et al. 2019 (KIMORE), IEEE TNSRE",
         "doi": "10.1109/TNSRE.2019.2923060",
-        "note": "KIMORE sagittal knee geometry adapted to MediaPipe world "
-                "landmarks inferred from monocular RGB.",
+        "note": "KIMORE sagittal knee geometry (atan2 convention) adapted to "
+                "MediaPipe world landmarks inferred from monocular RGB.",
     },
     "control_factors": {
         "classification": "ENGINEERING_ADAPTED",
@@ -69,16 +77,18 @@ METHOD_PROVENANCE = {
         ),
     },
     "filtering": {
-        "reference": "kimore_reference_zero_phase_filter (ref filter, offline, "
-                     "non-causal; order 3, 1 Hz, 30 Hz reference sample rate)",
+        "reference": "kimore_reference_zero_phase_filter (REFERENCE_DERIVED, "
+                     "offline, non-causal; order 3, 1 Hz, 30 Hz, ba-form "
+                     "Butterworth + filtfilt)",
         "causal": "CausalKimoreButterworth is an engineering adaptation with "
                   "phase delay and no clinical validation; not used here.",
     },
     "temporal_analysis": {
-        "classification": "REFERENCE_DERIVED",
-        "offline": True,
-        "note": "Reference peak settings are not automatically valid for an "
-                "arbitrary live session length.",
+        "exact": "kimore_reference_ex5_temporal_analysis (REFERENCE_DERIVED, "
+                 "requires complete 30 Hz stream; otherwise returns a "
+                 "structured warning)",
+        "adapted": "kimore_adapted_ex5_temporal_analysis (ENGINEERING_ADAPTED, "
+                   "actual frame rate; not the exact 30 Hz KIMORE reference)",
     },
 }
 
@@ -87,19 +97,23 @@ LIMITATIONS = [
     "KIMORE uses Kinect-derived 3D skeletal measurements, whereas BioGait "
     "uses MediaPipe world landmarks inferred from monocular RGB. Numerical "
     "equivalence and clinical validity are not assumed.",
-    "The offline reference temporal analysis is non-causal (filtfilt) and "
-    "must not be used as realtime causal filtering.",
-    "Reference full-sequence peak settings are not automatically valid for "
-    "an arbitrary session length; detected events are candidates, not "
-    "clinically valid repetitions.",
+    "The exact KIMORE reference temporal analysis is non-causal (filtfilt) and "
+    "must not be used as realtime causal filtering. It requires a complete, "
+    "uniformly sampled stream at the 30 Hz reference convention; otherwise it "
+    "returns a structured warning and no filtering is applied.",
+    "Reference full-sequence peak settings are not automatically valid for an "
+    "arbitrary session length; detected events are candidates, not clinically "
+    "valid repetitions, and no pass/fail is produced.",
     "Descriptive ROM / angular velocity values are kinematic summaries only; "
     "they are not clinical scores, pass/fail, or rehabilitation-quality "
     "judgements.",
     "MediaPipe wrist is a proxy for the KIMORE Hand joint; distances involving "
     "the wrist are engineering-adapted proxies.",
-    "This output contains no personal identifiers; it should not be "
-    "correlated to participant identity outside of a consented research "
-    "protocol.",
+    "Bilateral repetition pairing is deferred (no temporal pairing tolerance "
+    "is introduced here); per-side candidate counts are reported separately.",
+    "This output contains no personal identifiers and no local input paths; "
+    "it should not be correlated to participant identity outside of a "
+    "consented research protocol.",
 ]
 
 
@@ -126,13 +140,29 @@ def _build_landmarker(model_path: str):
     return mp_vision.PoseLandmarker.create_from_options(opts)
 
 
-def _open_video(path) -> tuple[Any, float, bool]:
-    cap = cv2.VideoCapture(str(path))
-    if not cap.isOpened():
-        raise RuntimeError(f"could not open video: {path}")
+def _read_video_fps(cap) -> tuple[float, bool]:
+    """Return (fps, trusted). fps=0.0 and trusted=False when metadata invalid."""
     fps = float(cap.get(cv2.CAP_PROP_FPS))
-    fps_ok = not (fps <= 0 or fps != fps)  # false when 0 or NaN
-    return cap, (fps if fps_ok else 30.0), fps_ok
+    if fps <= 0 or fps != fps:  # 0 / negative / NaN
+        return 0.0, False
+    return fps, True
+
+
+def _resolve_fps(video_fps: float, fps_from_video: bool, override: Optional[float]) -> float:
+    """Resolve the analysis frame rate without silently assuming a value.
+
+    - Valid video FPS -> use it.
+    - Else --fps override -> use it.
+    - Else -> raise with a clear message requiring --fps.
+    """
+    if fps_from_video:
+        return float(video_fps)
+    if override is not None:
+        return float(override)
+    raise ValueError(
+        "invalid or missing video FPS metadata; provide an explicit --fps "
+        "override for scientific temporal analysis"
+    )
 
 
 def _write_csv(path: Path, frames: list[dict]) -> None:
@@ -183,18 +213,23 @@ def analyze_video(
     csv_path: Optional[Path] = None,
     include_legacy: bool = False,
 ) -> dict:
-    """Run the offline analysis and write the structured session JSON."""
+    """Run the offline analysis and write the structured session JSON.
+
+    Console messages may print the local input path, but the persisted
+    research JSON never does (see ``source`` metadata).
+    """
     mp = __import__("mediapipe")
-    cap, video_fps, fps_from_video = _open_video(input_path)
-    fps = float(fps_override) if fps_override else video_fps
+    cap, video_fps, fps_from_video = _read_video_fps(cv2.VideoCapture(str(input_path)))
+    if not cap.isOpened():
+        raise RuntimeError(f"could not open video: {input_path}")
+    fps = _resolve_fps(video_fps, fps_from_video, fps_override)
+    timeline = SourceVideoTimeline(fps)
 
     model = _ensure_model() if model_path is None else str(model_path)
     landmarker = _build_landmarker(model)
 
     accumulator = SessionAccumulator(max_frames=max_frames if max_frames > 0 else None)
     frames: list[dict] = []
-    clock = MonotonicClock()
-    legacy_frames_read = 0
     start_wall = time.perf_counter()
 
     try:
@@ -204,14 +239,11 @@ def analyze_video(
                 ok, frame = cap.read()
                 if not ok:
                     break
-                timestamp_s = (
-                    float(frame_index) / fps if fps_from_video or fps_override
-                    else clock.elapsed_seconds()
-                )
+                timestamp_s = timeline.timestamp_seconds(frame_index)
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
                 result = landmarker.detect_for_video(
-                    img, clock.video_timestamp_ms()
+                    img, timeline.video_timestamp_ms(frame_index)
                 )
 
                 world = extract_world_landmarks(result)
@@ -220,14 +252,13 @@ def analyze_video(
                 ).to_dict()
 
                 if include_legacy:
-                    legacy_frames_read += 1
                     lms = extract_normalized_landmarks(result)
                     if lms:
                         metrics = calculate_pose_metrics(lms)
                     else:
                         metrics = no_pose_metrics()
                     metrics = add_session_fields(
-                        metrics, frame_index, clock.elapsed_seconds()
+                        metrics, frame_index, timestamp_s
                     )
                     evidence["legacy_metrics"] = metrics
 
@@ -241,20 +272,26 @@ def analyze_video(
         cap.release()
 
     processing_wall_s = time.perf_counter() - start_wall
-    arrays = accumulator.finite_arrays()
-    fs = accumulator.effective_sample_rate() or fps
+    aligned = accumulator.aligned_arrays()
 
-    left_ref = kimore_reference_ex5_temporal_analysis(
-        arrays["left_knee_sagittal_deg"], arrays["timestamps_s"], fs
+    left_exact = kimore_reference_ex5_temporal_analysis(
+        aligned["left_knee_sagittal_deg"], aligned["timestamps_s"], 30.0
     )
-    right_ref = kimore_reference_ex5_temporal_analysis(
-        arrays["right_knee_sagittal_deg"], arrays["timestamps_s"], fs
+    right_exact = kimore_reference_ex5_temporal_analysis(
+        aligned["right_knee_sagittal_deg"], aligned["timestamps_s"], 30.0
     )
-    ref_summary = merge_side_events(left_ref, right_ref)
-    descriptors = descriptive_temporal_features(arrays, ref_summary, fs)
+    # The ADAPTED path uses the deterministic source-video timeline rate.
+    left_adapted = kimore_adapted_ex5_temporal_analysis(
+        aligned["left_knee_sagittal_deg"], aligned["timestamps_s"], fps
+    )
+    right_adapted = kimore_adapted_ex5_temporal_analysis(
+        aligned["right_knee_sagittal_deg"], aligned["timestamps_s"], fps
+    )
+    summary = side_event_summary(left_adapted, right_adapted)
+    descriptors = descriptive_temporal_features(aligned, summary, fps)
 
-    available = accumulator.available_count
     total = accumulator.total_added
+    available = accumulator.available_count
     availability = (available / total) if total else 0.0
     quality_summary = {
         "frames_added": total,
@@ -264,11 +301,12 @@ def analyze_video(
         "evicted_frames": accumulator.evicted_count,
     }
 
+    # No local/absolute input path is persisted. Source metadata is neutral.
     source = {
-        "input_source": str(input_path),
+        "source_type": "local_video",
         "video_fps_hz": round(video_fps, 4) if fps_from_video else None,
         "fps_used_hz": round(fps, 4),
-        "frames_read": accumulator.total_added,
+        "frames_read": total,
         "fps_trusted_from_video": fps_from_video,
         "processing_wall_seconds": round(processing_wall_s, 4),
     }
@@ -279,7 +317,10 @@ def analyze_video(
         quality_summary=quality_summary,
         frames=frames,
         session_descriptors=descriptors,
-        kimore_reference_analysis={"left": left_ref, "right": right_ref},
+        kimore_reference_analysis={
+            "exact": {"left": left_exact, "right": right_exact},
+            "adapted": {"left": left_adapted, "right": right_adapted},
+        },
         limitations=LIMITATIONS,
         include_frames=True,
     )
@@ -291,16 +332,19 @@ def analyze_video(
     if csv_path:
         _write_csv(csv_path, frames)
 
+    print(f"[analyze_video] input={input_path}")
     print(f"[analyze_video] frames_added={total} available={available}")
     print(
-        f"[analyze_video] reference event candidates="
-        f"{ref_summary['n_reference_event_candidates']}"
+        f"[analyze_video] adapted reference candidates "
+        f"(left={summary['left_reference_maxima_count']}, "
+        f"right={summary['right_reference_maxima_count']}), "
+        f"bilateral_pairing={summary['bilateral_pairing_status']}"
     )
     print(f"[analyze_video] wrote {output_path}")
     return export
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="analyze_video",
         description="Offline BioGait KIMORE-informed session analyzer.",
@@ -309,13 +353,19 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--output", required=True, help="output session JSON path")
     parser.add_argument("--model", default=None, help="PoseLandmarker .task path")
     parser.add_argument("--fps", type=float, default=None,
-                        help="override video frame rate (Hz)")
+                        help="override video frame rate (Hz; required if video "
+                             "FPS metadata is invalid)")
     parser.add_argument("--max-frames", type=int, default=0,
                         help="process at most N frames (0 = all)")
     parser.add_argument("--csv", default=None,
                         help="optional per-frame CSV output path")
     parser.add_argument("--include-legacy", action="store_true",
                         help="also compute legacy screening metrics per frame")
+    return parser
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    parser = _build_parser()
     args = parser.parse_args(argv)
 
     try:
@@ -328,7 +378,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             csv_path=Path(args.csv) if args.csv else None,
             include_legacy=args.include_legacy,
         )
-    except Exception as exc:  # lightweight CLI diagnostics
+    except Exception as exc:  # lightweight CLI error reporting
         print(f"[analyze_video] ERROR: {type(exc).__name__}: {exc}")
         return 1
     return 0

@@ -232,10 +232,14 @@ class CameraWorker(QObject):
                     evidence = build_frame_evidence(
                         world, self._frame_i, elapsed
                     )
-                    self._evidence_acc.add(evidence.to_dict())
                 else:
                     metrics = no_pose_metrics()
                     emit_status("NO_POSE")
+                    # No-pose frames still count toward evidence availability:
+                    # an unavailable evidence entry, never fabricated landmarks.
+                    evidence = build_frame_evidence({}, self._frame_i, elapsed)
+
+                self._evidence_acc.add(evidence.to_dict())
 
                 metrics = add_session_fields(metrics, self._frame_i, elapsed)
 
@@ -283,17 +287,17 @@ class CameraWorker(QObject):
         """Emit a compact research-evidence payload for the UI panel.
 
         Descriptive only — no clinical scores, pass/fail, or colour
-        semantics. Uses the rolling evidence window for session ROM.
+        semantics. Uses the retained rolling window for availability and
+        session ROM (both come from the same window, never mixed with
+        lifetime counts).
         """
-        arrays = self._evidence_acc.finite_arrays()
+        arrays = self._evidence_acc.aligned_arrays()
         descriptors = descriptive_temporal_features(arrays)
         last = None
         for frame in reversed(self._evidence_acc.frames()):
             if frame["quality"].get("available"):
                 last = frame
                 break
-        total = self._evidence_acc.total_added
-        available = self._evidence_acc.available_count
 
         payload = {
             "left_knee_sagittal_deg": (
@@ -304,7 +308,7 @@ class CameraWorker(QObject):
             ),
             "available": bool(last is not None),
             "quality": (last["quality"] if last else {}),
-            "availability_rate": (available / total if total else None),
+            "availability_rate": self._evidence_acc.retained_availability_rate,
             "left_knee_rom_deg": descriptors.get("left_knee_rom_deg"),
             "right_knee_rom_deg": descriptors.get("right_knee_rom_deg"),
         }
