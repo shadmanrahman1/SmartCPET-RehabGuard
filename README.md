@@ -95,7 +95,7 @@ npm run dev
 
 ## BioGait Module — Movement Analysis
 
-A camera-based prototype for real-time gait screening using MediaPipe pose estimation.
+A camera-based prototype for real-time movement screening and movement analysis using MediaPipe pose estimation.
 
 ### Active Runtime
 

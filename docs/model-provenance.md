@@ -20,13 +20,15 @@ This document records the origin, training data, and current validation status o
 
 **Class mapping (verified from `cpet/backend/main.py` and `cpet/web_dashboard/src/lib/ecg-config.ts`):**
 
-| Class index | Name | Severity |
-|-------------|------|----------|
-| 0 | Normal | low |
-| 1 | Supraventricular | medium |
-| 2 | Ventricular | high |
-| 3 | Fusion | medium |
-| 4 | Unknown/Paced | low |
+| Class index | Name |
+|-------------|------|
+| 0 | Normal |
+| 1 | Supraventricular |
+| 2 | Ventricular |
+| 3 | Fusion |
+| 4 | Unknown/Paced |
+
+Class names are aligned with the current project class mapping. UI alert/severity presentation is an engineering-layer concern and is not part of the model provenance.
 
 **Notes:**
 - The model is a project-trained artifact.
@@ -58,14 +60,17 @@ This document records the origin, training data, and current validation status o
 | **Source** | Google MediaPipe official release |
 | **Download URL** | `https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task` |
 | **Auto-download** | Yes — `biogait/ui_worker.py:_ensure_model()` |
-| **License:**
-  - **MediaPipe framework / Python package:** Apache License 2.0
-  - **PoseLandmarker model artifact** (`pose_landmarker_lite.task`): Official Google-hosted pretrained model asset. Model artifact redistribution/license terms: **pending explicit verification**.
 | **Use** | Pose landmark extraction only |
+
+### License / redistribution note
+
+- MediaPipe framework / Python package: Apache License 2.0
+- `pose_landmarker_lite.task`: official Google-hosted pretrained asset
+- Artifact redistribution/license terms: **pending explicit verification**. Users must verify the model artifact license directly with Google before any redistribution.
 
 **Notes:**
 - This is a **general-purpose pretrained pose model**. It is **not** a rehabilitation-quality model.
-- It performs landmark detection only. Clinical-grade rehabilitation metrics require a separate validated model.
+- The pose model alone does not provide rehabilitation-quality assessment or clinical validation. Rehabilitation assessment methods require separate evidence and validation.
 - See `THIRD_PARTY_NOTICES.md` for license details.
 
 ---
