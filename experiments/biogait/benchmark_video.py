@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import statistics
 import sys
 import time
@@ -38,6 +39,21 @@ def _ensure_model() -> str:
     from analyze_video import _ensure_model as ensure
 
     return ensure()
+
+
+def percentile_nearest_rank(sorted_values: list[float], percentile: float = 0.95) -> float:
+    """Nearest-rank percentile on an already-sorted ascending sequence.
+
+    index = ceil(percentile * n) - 1, clamped to [0, n-1]. This is a
+    documented, deterministic convention (statistics.quantiles uses linear
+    interpolation; here we intentionally use nearest-rank for parity with the
+    benchmark reporting). Requires n >= 1.
+    """
+    n = len(sorted_values)
+    if n == 0:
+        raise ValueError("percentile_nearest_rank requires at least one value")
+    idx = max(0, min(n - 1, math.ceil(percentile * n) - 1))
+    return float(sorted_values[idx])
 
 
 def benchmark(input_path: Path, output_path: Optional[Path], fps_override: Optional[float]) -> dict[str, Any]:
@@ -94,8 +110,10 @@ def benchmark(input_path: Path, output_path: Optional[Path], fps_override: Optio
         cap.release()
 
     wall = time.perf_counter() - start
+    sorted_ms = sorted(per_frame_ms)
     results: dict[str, Any] = {
         "source_type": "local_video",
+        "timing_model": "constant_frame_rate_from_fps",
         "video_fps_hz": (round(fps, 4) if fps_from_video else None),
         "fps_used_hz": round(fps, 4),
         "fps_trusted_from_video": fps_from_video,
@@ -111,16 +129,16 @@ def benchmark(input_path: Path, output_path: Optional[Path], fps_override: Optio
         "mean_ms_per_frame": round(statistics.fmean(per_frame_ms), 4) if per_frame_ms else None,
         "median_ms_per_frame": round(statistics.median(per_frame_ms), 4) if per_frame_ms else None,
         "p95_ms_per_frame": (
-            round(sorted(per_frame_ms)[int(0.95 * len(per_frame_ms))], 4) if per_frame_ms else None
+            round(percentile_nearest_rank(sorted_ms), 4) if sorted_ms else None
         ),
         "effective_throughput_fps": round(total_frames / wall, 4) if wall > 0 else None,
     }
 
-    print(json.dumps(results, indent=2))
+    print(json.dumps(results, indent=2, allow_nan=False))
     if output_path is not None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(
-            json.dumps(results, indent=2), encoding="utf-8"
+            json.dumps(results, indent=2, allow_nan=False), encoding="utf-8"
         )
         print(f"[benchmark_video] wrote {output_path}")
     return results

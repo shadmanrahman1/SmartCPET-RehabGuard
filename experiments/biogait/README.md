@@ -27,22 +27,30 @@ python biogait/analyze_video.py --input path/to/video.mp4 --output out/session.j
 
 - If a video has valid FPS metadata it is used; otherwise an explicit `--fps`
   override is required for scientific temporal analysis (no silent 30 Hz
-  assumption, no wall-clock fallback).
+  assumption, no wall-clock fallback, and 29.97 is never rounded to 30).
 - Timing is deterministic on the source-video timeline (`frame_index / fps`);
   MediaPipe VIDEO timestamps are strictly increasing milliseconds from the
-  same helper. Processing wall time is used only for benchmarks.
+  same helper. Processing wall time is used only for benchmarks. Offline
+  analysis assumes a constant frame rate (`timing_model:
+  constant_frame_rate_from_fps`); variable-frame-rate inputs should be
+  transcoded/resampled to a known constant frame rate before scientific
+  temporal comparison.
 
 Output includes:
 
-- per-frame research evidence (world-landmark quality, primary outcomes,
-  control factors)
+- per-frame research evidence (feature-gated world-landmark quality, primary
+  outcomes, control factors)
 - session descriptors (duration, effective sample rate, descriptive ROM and
   angular velocity)
-- offline KIMORE reference temporal analysis — EXACT path (complete 30 Hz
-  stream) and ACTUAL-fps ADAPTED path — with per-side candidate counts and
-  durations; bilateral pairing is deferred (no combined repetition count)
-- neutral source metadata (`source_type`, FPS values, `frames_read`); the
-  local input path is never persisted
+- `temporal_analysis` with SEPARATE provenance branches:
+  - `reference` (source-aligned KIMORE reference path; REFERENCE_DERIVED; only
+    runs on a complete stream at 30 Hz with uniform 30 Hz timestamps)
+  - `adapted` (ENGINEERING_ADAPTED at the actual frame rate)
+  - each branch has per-side analysis and a per-side summary (left/right
+    maxima counts and candidate durations); bilateral pairing is deferred (no
+    combined repetition count)
+- neutral source metadata (`source_type`, `timing_model`, FPS values,
+  `frames_read`); the local input path is never persisted
 
 ## Per-frame benchmark
 
@@ -53,10 +61,11 @@ python experiments/biogait/benchmark_video.py --input path/to/video.mp4 --output
 
 Reports total frames, valid-pose frames, world-landmark availability,
 processing wall time, mean/median/p95 ms per frame, and effective throughput
-FPS. MediaPipe VIDEO timestamps come from the same deterministic source-video
-timeline helper (never `frame_count + 1`). If video FPS metadata is invalid,
-an explicit `--fps` override is required. Values are measured — never
-fabricated.
+FPS. p95 uses a documented nearest-rank calculation (`ceil(0.95*n)-1`,
+clamped). MediaPipe VIDEO timestamps come from the same deterministic
+source-video timeline helper (never `frame_count + 1`), and results carry the
+same `timing_model` metadata. If video FPS metadata is invalid, an explicit
+`--fps` override is required. Values are measured — never fabricated.
 
 ## Notes
 

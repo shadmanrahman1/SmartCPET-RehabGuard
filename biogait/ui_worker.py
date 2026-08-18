@@ -126,7 +126,7 @@ def _build_landmarker(model_path: str):
         running_mode=mp_vision.RunningMode.VIDEO,
         num_poses=1,
         min_pose_detection_confidence=config.POSE_MIN_DETECTION_CONFIDENCE,
-        min_pose_presence_confidence=0.5,
+        min_pose_presence_confidence=config.POSE_MIN_DETECTION_CONFIDENCE,
         min_tracking_confidence=config.POSE_MIN_TRACKING_CONFIDENCE,
     )
     return mp_vision.PoseLandmarker.create_from_options(opts)
@@ -286,31 +286,40 @@ class CameraWorker(QObject):
     def _emit_evidence(self) -> None:
         """Emit a compact research-evidence payload for the UI panel.
 
-        Descriptive only — no clinical scores, pass/fail, or colour
-        semantics. Uses the retained rolling window for availability and
-        session ROM (both come from the same window, never mixed with
-        lifetime counts).
+        Descriptive only — no clinical scores, pass/fail, or colour semantics.
+
+        Current-state fields come from the LATEST PROCESSED frame (frames[-1]).
+        On a NO_POSE frame an older available frame is never substituted, so a
+        stale knee angle cannot be displayed as current. Rolling statistics
+        (window ROM, rolling PO availability) are computed from the retained
+        rolling window and are kept separate from the current frame state.
         """
+        frames = self._evidence_acc.frames()
         arrays = self._evidence_acc.aligned_arrays()
         descriptors = descriptive_temporal_features(arrays)
-        last = None
-        for frame in reversed(self._evidence_acc.frames()):
-            if frame["quality"].get("available"):
-                last = frame
-                break
+
+        latest = frames[-1] if frames else None
+        latest_quality = latest["quality"] if latest else {}
+        if latest:
+            latest_left = latest["primary_outcomes"]["left_knee_sagittal_deg"]
+            latest_right = latest["primary_outcomes"]["right_knee_sagittal_deg"]
+        else:
+            latest_left = latest_right = None
 
         payload = {
-            "left_knee_sagittal_deg": (
-                last["primary_outcomes"]["left_knee_sagittal_deg"] if last else None
+            "left_knee_sagittal_deg": latest_left,
+            "right_knee_sagittal_deg": latest_right,
+            # Current evidence availability = latest frame's PO availability.
+            "available": bool(
+                latest_quality.get("available") if latest else False
             ),
-            "right_knee_sagittal_deg": (
-                last["primary_outcomes"]["right_knee_sagittal_deg"] if last else None
+            "quality": latest_quality,
+            # Rolling window metrics (separate from the current frame state).
+            "rolling_po_availability_rate": (
+                self._evidence_acc.retained_availability_rate
             ),
-            "available": bool(last is not None),
-            "quality": (last["quality"] if last else {}),
-            "availability_rate": self._evidence_acc.retained_availability_rate,
-            "left_knee_rom_deg": descriptors.get("left_knee_rom_deg"),
-            "right_knee_rom_deg": descriptors.get("right_knee_rom_deg"),
+            "rolling_left_knee_rom_deg": descriptors.get("left_knee_rom_deg"),
+            "rolling_right_knee_rom_deg": descriptors.get("right_knee_rom_deg"),
         }
         self.evidence_ready.emit(payload)
 

@@ -261,15 +261,17 @@ class ResearchEvidencePanel(QFrame):
         lay.addWidget(sub)
 
         self._rows: dict[str, QLabel] = {}
+        self._units: dict[str, str] = {}
         row_specs = [
             ("L sagittal knee", "°"),
             ("R sagittal knee", "°"),
-            ("World landmark quality", ""),
-            ("Evidence availability", ""),
-            ("Session L ROM", "°"),
-            ("Session R ROM", "°"),
+            ("Current PO evidence", ""),
+            ("Rolling PO availability", ""),
+            ("Rolling L ROM", "°"),
+            ("Rolling R ROM", "°"),
         ]
         for label, unit in row_specs:
+            self._units[label] = unit
             grid = QHBoxLayout(); grid.setSpacing(8)
             name = QLabel(label)
             name.setStyleSheet(
@@ -282,7 +284,6 @@ class ResearchEvidencePanel(QFrame):
             grid.addStretch()
             grid.addWidget(val)
             self._rows[label] = val
-            self._units = {label: unit for label, _ in row_specs}
             lay.addLayout(grid)
 
     def update_research_evidence(self, payload: dict) -> None:
@@ -303,18 +304,20 @@ class ResearchEvidencePanel(QFrame):
 
         quality = payload.get("quality") or {}
         available = payload.get("available", False) or quality.get("available", False)
-        self._rows["World landmark quality"].setText(
+        self._rows["Current PO evidence"].setText(
             "available" if available else "unavailable"
         )
 
-        rate = payload.get("availability_rate")
-        self._rows["Evidence availability"].setText(
+        rate = payload.get("rolling_po_availability_rate")
+        self._rows["Rolling PO availability"].setText(
             f"{rate * 100:.1f}%" if isinstance(rate, (int, float)) else "--"
         )
 
-        self._rows["Session L ROM"].setText(
-            _fmt("Session L ROM", payload.get("left_knee_rom_deg"))
+        # Rolling window ROM (last-300-processed-frame window), never billed
+        # as whole-session ROM.
+        self._rows["Rolling L ROM"].setText(
+            _fmt("Rolling L ROM", payload.get("rolling_left_knee_rom_deg"))
         )
-        self._rows["Session R ROM"].setText(
-            _fmt("Session R ROM", payload.get("right_knee_rom_deg"))
+        self._rows["Rolling R ROM"].setText(
+            _fmt("Rolling R ROM", payload.get("rolling_right_knee_rom_deg"))
         )

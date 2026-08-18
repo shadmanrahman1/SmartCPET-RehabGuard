@@ -20,16 +20,19 @@ from typing import Any, Mapping, Optional, Sequence
 import numpy as np
 
 from evidence_features import RESEARCH_EXERCISE
-from reference_temporal import side_event_summary
 
 SESSION_SCHEMA_VERSION = "1.0"
 
 # Selected control-factor streams retained by the accumulator.
+# NOTE: knee_delta_y_m is the reviewed source's signed Y-coordinate difference
+# (deltayknee = Knee_R(:,2) - Knee_L(:,2)); knee_euclidean_3d_m is a separate
+# DESCRIPTIVE Euclidean distance that is NOT presented as the source's d_k.
 SELECTED_CONTROL_FACTOR_STREAMS = (
     "wrist_distance_m",
     "shoulder_distance_m",
     "hip_distance_m",
-    "knee_distance_m",
+    "knee_euclidean_3d_m",
+    "knee_delta_y_m",
     "ankle_distance_m",
     "left_wrist_shoulder_distance_m",
     "right_wrist_shoulder_distance_m",
@@ -54,7 +57,9 @@ _REQUIRED_EVIDENCE_KEYS = (
 # "landmark name"); only these exact key names are rejected.
 FORBIDDEN_EXPORT_KEYS = {
     "patient",
+    "patient_id",
     "patient_name",
+    "participant_id",
     "participant_name",
     "subject_name",
     "subject_id",
@@ -273,15 +278,15 @@ def _abs_stats_deg_s(values: Sequence[float]) -> tuple[Optional[float], Optional
 
 def descriptive_temporal_features(
     aligned_arrays: Mapping[str, Sequence[Optional[float]]],
-    reference_summary: Optional[dict] = None,
     fs: Optional[float] = None,
 ) -> dict:
     """DESCRIPTIVE temporal features from index-aligned angle/time streams.
 
     These are descriptive kinematics only — never good/bad, correct/
     incorrect, risk, or a rehabilitation score. Values are None when data
-    is insufficient (never faked). Reference event counts and candidate
-    durations are reported per side; bilateral pairing is deferred.
+    is insufficient (never faked). Candidate-event analysis (reference event
+    counts and durations) intentionally does NOT live here; that belongs
+    under the export's ``temporal_analysis`` provenance branches.
     """
     timestamps = list(aligned_arrays.get("timestamps_s", []))
     left = list(aligned_arrays.get("left_knee_sagittal_deg", []))
@@ -316,19 +321,6 @@ def descriptive_temporal_features(
         else None
     )
 
-    if reference_summary:
-        n_left = reference_summary.get("left_reference_maxima_count")
-        n_right = reference_summary.get("right_reference_maxima_count")
-        left_durations = reference_summary.get(
-            "left_candidate_repetition_durations_s"
-        )
-        right_durations = reference_summary.get(
-            "right_candidate_repetition_durations_s"
-        )
-    else:
-        n_left = n_right = None
-        left_durations = right_durations = None
-
     return {
         "session_duration_s": session_duration,
         "effective_sample_rate_hz": (
@@ -343,19 +335,6 @@ def descriptive_temporal_features(
         "right_mean_abs_angular_velocity_deg_s": _round_optional(right_mean),
         "left_angular_velocity_deg_s": [round(v, 4) for v in left_omega],
         "right_angular_velocity_deg_s": [round(v, 4) for v in right_omega],
-        "left_reference_maxima_count": n_left,
-        "right_reference_maxima_count": n_right,
-        "left_candidate_repetition_durations_s": (
-            [round(float(d), 4) for d in left_durations]
-            if left_durations is not None
-            else None
-        ),
-        "right_candidate_repetition_durations_s": (
-            [round(float(d), 4) for d in right_durations]
-            if right_durations is not None
-            else None
-        ),
-        "bilateral_pairing_status": "deferred",
     }
 
 
@@ -394,7 +373,7 @@ def build_session_export(
     quality_summary: dict,
     frames: Sequence[dict],
     session_descriptors: dict,
-    kimore_reference_analysis: dict,
+    temporal_analysis: dict,
     limitations: Sequence[str],
     include_frames: bool = True,
 ) -> dict:
@@ -402,8 +381,10 @@ def build_session_export(
 
     ``source`` must NOT carry local/absolute input paths (see
     ``analyze_video.py`` which writes ``source_type``/``fps`` metadata
-    instead). Forbidden keys are rejected structurally via
-    :func:`_validate_no_forbidden_keys`.
+    instead). ``temporal_analysis`` holds the reference/adapted provenance
+    branches, each with per-side analysis and a generic summary (no unified
+    repetition count; bilateral pairing deferred). Forbidden keys are rejected
+    structurally via :func:`_validate_no_forbidden_keys`.
     """
     export: dict[str, Any] = {
         "schema_version": SESSION_SCHEMA_VERSION,
@@ -414,7 +395,7 @@ def build_session_export(
         "quality_summary": dict(quality_summary),
         "frames": list(frames) if include_frames else [],
         "session_descriptors": dict(session_descriptors),
-        "kimore_reference_analysis": dict(kimore_reference_analysis),
+        "temporal_analysis": dict(temporal_analysis),
         "limitations": list(limitations),
     }
     _validate_no_forbidden_keys(export)

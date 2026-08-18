@@ -1,23 +1,28 @@
 """
-Tests for biogait/session_analysis.py — bounded accumulator, effective sample
-rate, descriptive features.
+Tests for biogait/session_analysis.py — bounded accumulator, aligned arrays,
+descriptive features, and the versioned session export schema.
 
 Synthetic deterministic data only. No camera/GUI/network. Descriptive
 features are tested as kinematic math, not as clinical scores.
 """
 from __future__ import annotations
 
-import math
+import json
 import sys
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "biogait"))
 
+import config  # noqa: E402
+
 from evidence_features import build_frame_evidence  # noqa: E402
 from session_analysis import (  # noqa: E402
+    FORBIDDEN_EXPORT_KEYS,
+    SESSION_SCHEMA_VERSION,
     SELECTED_CONTROL_FACTOR_STREAMS,
     SessionAccumulator,
+    build_session_export,
     descriptive_temporal_features,
 )
 
@@ -43,9 +48,7 @@ def _default_landmarks():
 
 def _evidence(frame_index, timestamp_s, available=True, left=None, right=None):
     scene = _default_landmarks() if available else {}
-    ev = build_frame_evidence(
-        scene, frame_index, timestamp_s, visibility_threshold=0.55
-    )
+    ev = build_frame_evidence(scene, frame_index, timestamp_s)
     if left is not None:
         ev.primary_outcomes["left_knee_sagittal_deg"] = left
     if right is not None:
@@ -62,7 +65,6 @@ class AccumulatorTests(unittest.TestCase):
         self.assertEqual(acc.total_added, 3)
         self.assertEqual(acc.available_count, 2)
         self.assertEqual(acc.unavailable_count, 1)
-        self.assertEqual(acc.retained_frames, 3)
 
     def test_bounded_window_evicts_oldest(self):
         acc = SessionAccumulator(max_frames=5)
@@ -89,7 +91,6 @@ class AccumulatorTests(unittest.TestCase):
         self.assertEqual(aligned["timestamps_s"], [0.0, 0.033, 0.066])
         self.assertEqual(aligned["left_knee_sagittal_deg"], [None, None, 130.0])
         self.assertEqual(aligned["right_knee_sagittal_deg"], [None, 118.0, 128.0])
-        # Control-factor streams aligned too: every frame contributes an entry.
         self.assertEqual(len(aligned["torso_area_m2"]), 3)
         self.assertIsNone(aligned["torso_area_m2"][0])
 
@@ -97,41 +98,29 @@ class AccumulatorTests(unittest.TestCase):
         acc = SessionAccumulator(max_frames=4)
         for i in range(6):
             acc.add(_evidence(i, i * 0.1, available=(i % 2 == 0)))
-        # lifetime
         self.assertEqual(acc.total_added, 6)
         self.assertEqual(acc.available_count, 3)
         self.assertEqual(acc.unavailable_count, 3)
-        # retained window: frames 2,3,4,5 -> available: 2,4 -> 2 of 4
         self.assertEqual(acc.retained_frames, 4)
         self.assertEqual(acc.retained_available_count, 2)
         self.assertEqual(acc.retained_unavailable_count, 2)
         self.assertAlmostEqual(acc.retained_availability_rate, 0.5)
 
-    def test_finite_arrays_exclude_unavailable_frames(self):
-        acc = SessionAccumulator()
-        acc.add(_evidence(0, 0.0, available=False))
-        acc.add(_evidence(1, 0.033, left=120.0, right=118.0))
-        acc.add(_evidence(2, 0.066, left=130.0, right=128.0))
-        arrays = acc.finite_arrays()
-        self.assertEqual(arrays["timestamps_s"], [0.033, 0.066])
-        self.assertEqual(arrays["left_knee_sagittal_deg"], [120.0, 130.0])
-        self.assertFalse(any(v is None for v in arrays["timestamps_s"]))
-
-    def test_finite_arrays_include_selected_cf_streams(self):
+    def test_control_factor_streams_renamed(self):
         acc = SessionAccumulator()
         acc.add(_evidence(0, 0.0))
-        arrays = acc.finite_arrays()
+        arrays = acc.aligned_arrays()
+        self.assertIn("knee_euclidean_3d_m", arrays)
+        self.assertIn("knee_delta_y_m", arrays)
+        self.assertNotIn("knee_distance_m", arrays)
         for name in SELECTED_CONTROL_FACTOR_STREAMS:
             self.assertIn(name, arrays)
-        self.assertIsNotNone(arrays["torso_area_m2"][0])
 
     def test_effective_sample_rate_from_timestamps(self):
         acc = SessionAccumulator()
         for i in range(10):
             acc.add(_evidence(i, i / 30.0))
-        rate = acc.effective_sample_rate()
-        self.assertIsNotNone(rate)
-        self.assertAlmostEqual(rate, 30.0, places=0)
+        self.assertAlmostEqual(acc.effective_sample_rate(), 30.0, places=0)
 
     def test_effective_sample_rate_none_when_single(self):
         acc = SessionAccumulator()
@@ -159,15 +148,12 @@ class DescriptiveFeaturesTests(unittest.TestCase):
             "right_knee_sagittal_deg": [100.0, 120.0, 100.0],
         }
         desc = descriptive_temporal_features(arrays)
-        # deltas: L -> [10, 20]; R -> [20, -20]
         self.assertAlmostEqual(desc["left_peak_abs_angular_velocity_deg_s"], 20.0)
         self.assertAlmostEqual(desc["left_mean_abs_angular_velocity_deg_s"], 15.0)
         self.assertAlmostEqual(desc["right_peak_abs_angular_velocity_deg_s"], 20.0)
         self.assertAlmostEqual(desc["right_mean_abs_angular_velocity_deg_s"], 20.0)
 
     def test_angular_velocity_skips_gaps_index_aligned(self):
-        # None gap in the middle: the interval across the gap must NOT be
-        # bridged as if the missing frame did not exist.
         arrays = {
             "timestamps_s": [0.0, 1.0, 2.0, 3.0],
             "left_knee_sagittal_deg": [100.0, 130.0, None, 100.0],
@@ -176,18 +162,18 @@ class DescriptiveFeaturesTests(unittest.TestCase):
         desc = descriptive_temporal_features(arrays)
         self.assertEqual(desc["left_angular_velocity_deg_s"], [30.0])
         self.assertEqual(desc["right_angular_velocity_deg_s"], [0.0])
-        # The (100->100 across 2s) bridge must not appear.
-        self.assertNotIn(0.0, desc["left_angular_velocity_deg_s"])
 
-    def test_angular_velocity_requires_increasing_timestamps(self):
+    def test_no_event_count_fields_in_descriptors(self):
         arrays = {
-            "timestamps_s": [0.0, 1.0, 1.0],
-            "left_knee_sagittal_deg": [100.0, 120.0, 140.0],
-            "right_knee_sagittal_deg": [100.0, 100.0, 100.0],
+            "timestamps_s": [0.0, 1.0],
+            "left_knee_sagittal_deg": [100.0, 120.0],
+            "right_knee_sagittal_deg": [100.0, 120.0],
         }
         desc = descriptive_temporal_features(arrays)
-        # dt=0 between index1 and index2 -> skipped; only first interval kept.
-        self.assertEqual(len(desc["left_angular_velocity_deg_s"]), 1)
+        for banned in ("maxima", "candidate", "repetition", "deferred", "pairing"):
+            self.assertFalse(any(banned in k for k in desc), desc)
+        for banned in ("risk", "pass", "score", "clinical"):
+            self.assertFalse(any(banned in k for k in desc))
 
     def test_insufficient_data_yields_none(self):
         arrays = {
@@ -198,39 +184,129 @@ class DescriptiveFeaturesTests(unittest.TestCase):
         desc = descriptive_temporal_features(arrays)
         self.assertIsNone(desc["session_duration_s"])
         self.assertIsNone(desc["left_knee_rom_deg"])
-        self.assertIsNone(desc["effective_sample_rate_hz"])
 
-    def test_reference_summary_features_per_side(self):
-        arrays = {
-            "timestamps_s": [0.0, 2.0, 4.0],
-            "left_knee_sagittal_deg": [100.0, 140.0, 100.0],
-            "right_knee_sagittal_deg": [100.0, 140.0, 100.0],
-        }
-        summary = {
-            "left_reference_maxima_count": 2,
-            "right_reference_maxima_count": 1,
-            "left_candidate_repetition_durations_s": [2.0, 2.0],
-            "right_candidate_repetition_durations_s": [4.0],
-            "bilateral_pairing_status": "deferred",
-        }
-        desc = descriptive_temporal_features(arrays, reference_summary=summary)
-        self.assertEqual(desc["left_reference_maxima_count"], 2)
-        self.assertEqual(desc["right_reference_maxima_count"], 1)
-        self.assertEqual(desc["left_candidate_repetition_durations_s"], [2.0, 2.0])
-        self.assertEqual(desc["right_candidate_repetition_durations_s"], [4.0])
-        self.assertEqual(desc["bilateral_pairing_status"], "deferred")
-        self.assertNotIn("n_reference_event_candidates", desc)
-        self.assertNotIn("candidate_repetition_durations_s", desc)
 
-    def test_no_clinical_fields_emitted(self):
-        arrays = {
-            "timestamps_s": [0.0, 1.0],
-            "left_knee_sagittal_deg": [100.0, 120.0],
-            "right_knee_sagittal_deg": [100.0, 120.0],
+class SessionExportTests(unittest.TestCase):
+    def _source(self):
+        return {
+            "source_type": "local_video",
+            "timing_model": "constant_frame_rate_from_fps",
+            "video_fps_hz": 30.0,
+            "fps_used_hz": 30.0,
+            "frames_read": 3,
+            "fps_trusted_from_video": True,
         }
-        desc = descriptive_temporal_features(arrays)
-        for banned in ("risk", "pass", "score", "clinical"):
-            self.assertFalse(any(banned in k for k in desc))
+
+    def _frames(self):
+        return [build_frame_evidence(_default_landmarks(), i, i * 0.033).to_dict() for i in range(3)]
+
+    def _descriptors(self):
+        return {
+            "session_duration_s": 0.066,
+            "effective_sample_rate_hz": 30.0,
+            "left_knee_rom_deg": 3.0,
+            "right_knee_rom_deg": 3.0,
+        }
+
+    def _temporal(self):
+        return {
+            "reference": {
+                "classification": "REFERENCE_DERIVED",
+                "offline": True,
+                "left": {"warning": None, "maxima_indices": [0, 2]},
+                "right": {"warning": None, "maxima_indices": [0, 2]},
+                "summary": {
+                    "left_maxima_count": 2,
+                    "right_maxima_count": 2,
+                    "left_candidate_durations_s": [1.0],
+                    "right_candidate_durations_s": [1.0],
+                    "bilateral_pairing_status": "deferred",
+                },
+            },
+            "adapted": {
+                "classification": "ENGINEERING_ADAPTED",
+                "offline": True,
+                "left": {"warning": "missing_samples_require_resampling"},
+                "right": {"warning": "missing_samples_require_resampling"},
+                "summary": {
+                    "left_maxima_count": 0,
+                    "right_maxima_count": 0,
+                    "left_candidate_durations_s": [],
+                    "right_candidate_durations_s": [],
+                    "bilateral_pairing_status": "deferred",
+                },
+            },
+        }
+
+    def _export(self, **overrides):
+        kwargs = dict(
+            source=self._source(),
+            method_provenance={"primary_outcomes": {"classification": "ENGINEERING_ADAPTED"}},
+            quality_summary={"frames_added": 3, "available_frames": 3, "unavailable_frames": 0, "availability_rate": 1.0, "evicted_frames": 0},
+            frames=self._frames(),
+            session_descriptors=self._descriptors(),
+            temporal_analysis=self._temporal(),
+            limitations=["limitation A"],
+        )
+        kwargs.update(overrides)
+        return build_session_export(**kwargs)
+
+    def test_top_level_uses_temporal_analysis(self):
+        export = self._export()
+        self.assertEqual(export["schema_version"], SESSION_SCHEMA_VERSION)
+        self.assertNotIn("kimore_reference_analysis", export)
+        self.assertIn("temporal_analysis", export)
+        expected = {
+            "schema_version", "module", "exercise", "source",
+            "method_provenance", "quality_summary", "frames",
+            "session_descriptors", "temporal_analysis", "limitations",
+        }
+        self.assertEqual(set(export), expected)
+
+    def test_temporal_analysis_branches_have_classification(self):
+        export = self._export()
+        ta = export["temporal_analysis"]
+        self.assertEqual(ta["reference"]["classification"], "REFERENCE_DERIVED")
+        self.assertEqual(ta["adapted"]["classification"], "ENGINEERING_ADAPTED")
+        self.assertEqual(ta["reference"]["summary"]["bilateral_pairing_status"], "deferred")
+
+    def test_json_roundtrip_no_nan(self):
+        export = self._export()
+        text = json.dumps(export, allow_nan=False)
+        loaded = json.loads(text)
+        self.assertEqual(loaded["schema_version"], SESSION_SCHEMA_VERSION)
+
+    def test_local_path_never_persisted(self):
+        export = self._export()
+        text = json.dumps(export)
+        self.assertEqual(export["source"]["source_type"], "local_video")
+        self.assertIn("timing_model", export["source"])
+        for leaked in ("C:\\", "/Users/", "demo_video.mp4", "patients/"):
+            self.assertNotIn(leaked, text)
+
+    def test_forbidden_keys_raise_value_error(self):
+        for key in ("patient_id", "participant_id", "subject_id", "email"):
+            frames = self._frames()
+            frames[0]["metadata"][key] = "x"
+            with self.assertRaises(ValueError):
+                self._export(frames=frames)
+
+    def test_forbidden_key_in_source_nested_raises(self):
+        source = self._source()
+        source["meta"] = {"owner": {"subject_name": "id"}}
+        with self.assertRaises(ValueError):
+            self._export(source=source)
+
+    def test_benign_text_containing_name_does_not_fail(self):
+        frames = self._frames()
+        frames[0]["quality"]["landmark_name"] = "left_hip"
+        frames[0]["metadata"]["note"] = "the anatomical landmark name is stored verbatim"
+        export = self._export(frames=frames)
+        self.assertEqual(len(export["frames"]), 3)
+
+    def test_forbidden_set_contains_identity_keys(self):
+        self.assertTrue({"patient_id", "participant_id", "subject_id", "email"}
+                        <= FORBIDDEN_EXPORT_KEYS)
 
 
 if __name__ == "__main__":

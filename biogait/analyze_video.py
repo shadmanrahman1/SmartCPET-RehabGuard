@@ -2,8 +2,8 @@
 
 Reproducible experiment path: processes a video frame-by-frame with the same
 MediaPipe PoseLandmarker model, extracts world-landmark research evidence,
-accumulates a session, runs the offline KIMORE reference temporal analysis,
-and writes a structured, versioned session JSON.
+accumulates a session, runs the offline source-aligned KIMORE reference
+temporal analysis, and writes a structured, versioned session JSON.
 
 No Qt GUI is required. A live webcam is NOT required.
 
@@ -14,13 +14,22 @@ Example:
 
 Timing is deterministic on the SOURCE VIDEO TIMELINE (frame_index / fps);
 processing wall-clock time is never used as the scientific video timeline.
+Offline analysis assumes a constant frame rate derived from video FPS metadata
+(or an explicit --fps override); true per-frame source PTS recovery for
+variable-frame-rate inputs is not claimed.
 
 IMPORTANT: this is an OFFLINE research/experiment path. Results are
 descriptive and reference-derived; they are not a clinical assessment.
-The exact KIMORE reference path requires a complete 30 Hz stream; when the
-video frame rate differs or samples are missing it returns a structured
-warning. An ENGINEERING_ADAPTED path at the actual frame rate is also
-reported.
+The source-aligned KIMORE reference path requires a complete 30 Hz stream
+with uniform 30 Hz timestamps; when the video frame rate differs or samples
+are missing it returns a structured warning. An ENGINEERING_ADAPTED path at
+the actual frame rate is also reported.
+
+The project is PYTHON-ONLY. The reviewed original KIMORE source was written
+in MATLAB; BioGait does not depend on or execute MATLAB. Source equations and
+preprocessing conventions are re-implemented in Python for methodological
+traceability. Numerical identity with the original MATLAB runtime has not
+been established.
 """
 from __future__ import annotations
 
@@ -34,6 +43,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 import cv2
+
+import config
 
 # Heavy runtime dependencies (cv2, mediapipe) are imported lazily below so the
 # module stays importable in lightweight CI for argument/parse checks.
@@ -60,14 +71,17 @@ MODEL_URL = (
     "https://storage.googleapis.com/mediapipe-models/"
     "pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task"
 )
+TIMING_MODEL = "constant_frame_rate_from_fps"
 
 METHOD_PROVENANCE = {
     "primary_outcomes": {
         "classification": "ENGINEERING_ADAPTED",
         "reference": "Capecci et al. 2019 (KIMORE), IEEE TNSRE",
         "doi": "10.1109/TNSRE.2019.2923060",
-        "note": "KIMORE sagittal knee geometry (atan2 convention) adapted to "
-                "MediaPipe world landmarks inferred from monocular RGB.",
+        "note": "Source-aligned KIMORE sagittal knee geometry (atan2 "
+                "convention) adapted to MediaPipe world landmarks inferred "
+                "from monocular RGB. Numerical identity with the original "
+                "MATLAB runtime has not been established.",
     },
     "control_factors": {
         "classification": "ENGINEERING_ADAPTED",
@@ -75,32 +89,54 @@ METHOD_PROVENANCE = {
             "MediaPipe wrist used as an ENGINEERING_ADAPTED proxy for the "
             "KIMORE Hand joint; not an exact kinematic equivalent."
         ),
+        "knee_discrepancy": (
+            "The KIMORE paper labels d_k as knee distance, while the reviewed "
+            "feature-extraction source computes a signed Y-coordinate "
+            "difference (deltayknee = Knee_R(:,2) - Knee_L(:,2)). BioGait "
+            "preserves this discrepancy in provenance; the Euclidean "
+            "knee_euclidean_3d_m is a separate DESCRIPTIVE value and is not "
+            "presented as the source d_k."
+        ),
+        "cf_preprocessing": (
+            "Sprint A implements CF geometry/evidence only. The reviewed "
+            "source's later CF temporal trim/filter preprocessing is DEFERRED."
+        ),
     },
     "filtering": {
         "reference": "kimore_reference_zero_phase_filter (REFERENCE_DERIVED, "
-                     "offline, non-causal; order 3, 1 Hz, 30 Hz, ba-form "
-                     "Butterworth + filtfilt)",
+                     "offline, non-causal; FIXED order 3, 1 Hz, 30 Hz, "
+                     "ba-form Butterworth + filtfilt)",
+        "adapted": "kimore_adapted_zero_phase_filter (ENGINEERING_ADAPTED, "
+                   "offline, non-causal; order 3, 1 Hz at the actual frame "
+                   "rate — NOT the reference filter)",
         "causal": "CausalKimoreButterworth is an engineering adaptation with "
                   "phase delay and no clinical validation; not used here.",
     },
     "temporal_analysis": {
-        "exact": "kimore_reference_ex5_temporal_analysis (REFERENCE_DERIVED, "
-                 "requires complete 30 Hz stream; otherwise returns a "
-                 "structured warning)",
+        "reference": "kimore_reference_ex5_temporal_analysis "
+                     "(SOURCE-ALIGNED KIMORE REFERENCE PATH; REFERENCE_DERIVED; "
+                     "requires a complete stream at 30 Hz with uniform 30 Hz "
+                     "timestamps; otherwise returns a structured warning)",
         "adapted": "kimore_adapted_ex5_temporal_analysis (ENGINEERING_ADAPTED, "
-                   "actual frame rate; not the exact 30 Hz KIMORE reference)",
+                   "actual frame rate; not the 30 Hz KIMORE reference)",
     },
 }
 
 LIMITATIONS = [
     "BioGait is KIMORE-informed rather than a direct KIMORE reproduction. "
-    "KIMORE uses Kinect-derived 3D skeletal measurements, whereas BioGait "
+    "KIMORE uses Kinect-derived 3D skeletal coordinates, whereas BioGait "
     "uses MediaPipe world landmarks inferred from monocular RGB. Numerical "
     "equivalence and clinical validity are not assumed.",
-    "The exact KIMORE reference temporal analysis is non-causal (filtfilt) and "
-    "must not be used as realtime causal filtering. It requires a complete, "
-    "uniformly sampled stream at the 30 Hz reference convention; otherwise it "
-    "returns a structured warning and no filtering is applied.",
+    "The source-aligned KIMORE reference temporal analysis is non-causal "
+    "(filtfilt) and must not be used as realtime causal filtering. It "
+    "requires a complete, uniformly sampled stream at the 30 Hz reference "
+    "convention (including uniform 30 Hz timestamps); otherwise it returns a "
+    "structured warning and no filtering is applied.",
+    "Offline analysis assumes a constant frame rate from video FPS metadata "
+    "or an explicit --fps override (timing_model=constant_frame_rate_from_fps). "
+    "Variable-frame-rate inputs should be transcoded/resampled to a known "
+    "constant frame rate before scientific temporal comparison; no claim of "
+    "true per-frame source PTS recovery is made.",
     "Reference full-sequence peak settings are not automatically valid for an "
     "arbitrary session length; detected events are candidates, not clinically "
     "valid repetitions, and no pass/fail is produced.",
@@ -109,8 +145,15 @@ LIMITATIONS = [
     "judgements.",
     "MediaPipe wrist is a proxy for the KIMORE Hand joint; distances involving "
     "the wrist are engineering-adapted proxies.",
+    "The KIMORE paper labels d_k as knee distance while the reviewed source "
+    "computes a signed Y-coordinate difference; BioGait preserves this "
+    "discrepancy and reports knee_delta_y_m (reference equation) separately "
+    "from knee_euclidean_3d_m (descriptive).",
+    "The reviewed source's CF temporal trim/filter preprocessing is DEFERRED; "
+    "Sprint A exports CF geometry/evidence only.",
     "Bilateral repetition pairing is deferred (no temporal pairing tolerance "
-    "is introduced here); per-side candidate counts are reported separately.",
+    "is introduced here); per-side candidate counts are reported separately "
+    "under each provenance branch.",
     "This output contains no personal identifiers and no local input paths; "
     "it should not be correlated to participant identity outside of a "
     "consented research protocol.",
@@ -133,9 +176,9 @@ def _build_landmarker(model_path: str):
         base_options=base_opts,
         running_mode=mp_vision.RunningMode.VIDEO,
         num_poses=1,
-        min_pose_detection_confidence=0.5,
-        min_pose_presence_confidence=0.5,
-        min_tracking_confidence=0.5,
+        min_pose_detection_confidence=config.POSE_MIN_DETECTION_CONFIDENCE,
+        min_pose_presence_confidence=config.POSE_MIN_DETECTION_CONFIDENCE,
+        min_tracking_confidence=config.POSE_MIN_TRACKING_CONFIDENCE,
     )
     return mp_vision.PoseLandmarker.create_from_options(opts)
 
@@ -175,7 +218,8 @@ def _write_csv(path: Path, frames: list[dict]) -> None:
         "wrist_distance_m",
         "shoulder_distance_m",
         "hip_distance_m",
-        "knee_distance_m",
+        "knee_euclidean_3d_m",
+        "knee_delta_y_m",
         "ankle_distance_m",
         "torso_area_m2",
     ]
@@ -196,7 +240,8 @@ def _write_csv(path: Path, frames: list[dict]) -> None:
                     "wrist_distance_m": cf.get("wrist_distance_m"),
                     "shoulder_distance_m": cf.get("shoulder_distance_m"),
                     "hip_distance_m": cf.get("hip_distance_m"),
-                    "knee_distance_m": cf.get("knee_distance_m"),
+                    "knee_euclidean_3d_m": cf.get("knee_euclidean_3d_m"),
+                    "knee_delta_y_m": cf.get("knee_delta_y_m"),
                     "ankle_distance_m": cf.get("ankle_distance_m"),
                     "torso_area_m2": cf.get("torso_area_m2"),
                 }
@@ -280,11 +325,13 @@ def analyze_video(
         processing_wall_s = time.perf_counter() - start_wall
         aligned = accumulator.aligned_arrays()
 
-        left_exact = kimore_reference_ex5_temporal_analysis(
-            aligned["left_knee_sagittal_deg"], aligned["timestamps_s"], 30.0
+        # The REFERENCE path receives the ACTUAL resolved fps and gates itself
+        # to the 30 Hz convention; it never silently rounds e.g. 29.97 to 30.
+        left_reference = kimore_reference_ex5_temporal_analysis(
+            aligned["left_knee_sagittal_deg"], aligned["timestamps_s"], fps
         )
-        right_exact = kimore_reference_ex5_temporal_analysis(
-            aligned["right_knee_sagittal_deg"], aligned["timestamps_s"], 30.0
+        right_reference = kimore_reference_ex5_temporal_analysis(
+            aligned["right_knee_sagittal_deg"], aligned["timestamps_s"], fps
         )
         # The ADAPTED path uses the deterministic source-video timeline rate.
         left_adapted = kimore_adapted_ex5_temporal_analysis(
@@ -293,8 +340,27 @@ def analyze_video(
         right_adapted = kimore_adapted_ex5_temporal_analysis(
             aligned["right_knee_sagittal_deg"], aligned["timestamps_s"], fps
         )
-        summary = side_event_summary(left_adapted, right_adapted)
-        descriptors = descriptive_temporal_features(aligned, summary, fps)
+        reference_summary = side_event_summary(left_reference, right_reference)
+        adapted_summary = side_event_summary(left_adapted, right_adapted)
+
+        temporal_analysis = {
+            "reference": {
+                "classification": "REFERENCE_DERIVED",
+                "offline": True,
+                "left": left_reference,
+                "right": right_reference,
+                "summary": reference_summary,
+            },
+            "adapted": {
+                "classification": "ENGINEERING_ADAPTED",
+                "offline": True,
+                "left": left_adapted,
+                "right": right_adapted,
+                "summary": adapted_summary,
+            },
+        }
+
+        descriptors = descriptive_temporal_features(aligned, fps)
 
         total = accumulator.total_added
         available = accumulator.available_count
@@ -310,6 +376,7 @@ def analyze_video(
         # No local/absolute input path is persisted. Source metadata is neutral.
         source = {
             "source_type": "local_video",
+            "timing_model": TIMING_MODEL,
             "video_fps_hz": round(video_fps, 4) if fps_from_video else None,
             "fps_used_hz": round(fps, 4),
             "frames_read": total,
@@ -323,17 +390,17 @@ def analyze_video(
             quality_summary=quality_summary,
             frames=frames,
             session_descriptors=descriptors,
-            kimore_reference_analysis={
-                "exact": {"left": left_exact, "right": right_exact},
-                "adapted": {"left": left_adapted, "right": right_adapted},
-            },
+            temporal_analysis=temporal_analysis,
             limitations=LIMITATIONS,
             include_frames=True,
         )
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(
-            json.dumps(export, indent=2, ensure_ascii=False), encoding="utf-8"
+            # allow_nan=False: invalid numerical values can never silently
+            # become non-standard NaN/Infinity in the JSON.
+            json.dumps(export, indent=2, ensure_ascii=False, allow_nan=False),
+            encoding="utf-8",
         )
         if csv_path:
             _write_csv(csv_path, frames)
@@ -341,10 +408,10 @@ def analyze_video(
         print(f"[analyze_video] input={input_path}")
         print(f"[analyze_video] frames_added={total} available={available}")
         print(
-            f"[analyze_video] adapted reference candidates "
-            f"(left={summary['left_reference_maxima_count']}, "
-            f"right={summary['right_reference_maxima_count']}), "
-            f"bilateral_pairing={summary['bilateral_pairing_status']}"
+            f"[analyze_video] reference candidates "
+            f"(left={reference_summary['left_maxima_count']}, "
+            f"right={reference_summary['right_maxima_count']}), "
+            f"bilateral_pairing={reference_summary['bilateral_pairing_status']}"
         )
         print(f"[analyze_video] wrote {output_path}")
         return export

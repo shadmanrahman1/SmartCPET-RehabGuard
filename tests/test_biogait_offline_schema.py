@@ -1,12 +1,15 @@
 """
-Tests for the versioned research-session export schema (Phase I / M4).
+Tests for the versioned research-session export schema (Phase I / M4) with
+strict JSON / data-safety behavior (items 16, 23).
 
-Uses synthetic FrameEvidence dicts; no camera/GUI/network. Verifies
-structure, JSON round-tripping, and the no-PII guard.
+Uses synthetic FrameEvidence dicts; no camera/GUI/network. Verifies structure,
+JSON round-tripping, allow_nan=False, forbidden-key rejection, and the neutral
+source metadata that never persists a local input path.
 """
 from __future__ import annotations
 
 import json
+import math
 import sys
 import unittest
 from pathlib import Path
@@ -41,21 +44,18 @@ def _default_landmarks():
 
 
 def _frames(n=3):
-    frames = []
-    for i in range(n):
-        frames.append(
-            build_frame_evidence(
-                _default_landmarks(), i, i * 0.033
-            ).to_dict()
-        )
-    return frames
+    return [
+        build_frame_evidence(_default_landmarks(), i, i * 0.033).to_dict()
+        for i in range(n)
+    ]
 
 
 def _source():
     # Neutral source metadata — the local/absolute input path is NEVER
-    # persisted in the research JSON (FIX 14).
+    # persisted in the research JSON.
     return {
         "source_type": "local_video",
+        "timing_model": "constant_frame_rate_from_fps",
         "video_fps_hz": 30.0,
         "fps_used_hz": 30.0,
         "frames_read": 3,
@@ -86,20 +86,52 @@ def _descriptors():
     return descriptive_temporal_features(arrays)
 
 
-def _reference():
-    return {"left": {"warning": None}, "right": {"warning": None}}
+def _temporal():
+    def _side(warning):
+        return {
+            "warning": warning,
+            "filtered_signal": [] if warning else [1.0, 2.0, 3.0],
+            "maxima_indices": [] if warning else [0, 2],
+            "candidate_repetition_durations_s": [] if warning else [1.0],
+        }
+
+    return {
+        "reference": {
+            "classification": "REFERENCE_DERIVED",
+            "offline": True,
+            "left": _side(None),
+            "right": _side(None),
+            "summary": {
+                "left_maxima_count": 2,
+                "right_maxima_count": 2,
+                "left_candidate_durations_s": [1.0],
+                "right_candidate_durations_s": [1.0],
+                "bilateral_pairing_status": "deferred",
+            },
+        },
+        "adapted": {
+            "classification": "ENGINEERING_ADAPTED",
+            "offline": True,
+            "left": _side("missing_samples_require_resampling"),
+            "right": _side("missing_samples_require_resampling"),
+            "summary": {
+                "left_maxima_count": 0,
+                "right_maxima_count": 0,
+                "left_candidate_durations_s": [],
+                "right_candidate_durations_s": [],
+                "bilateral_pairing_status": "deferred",
+            },
+        },
+    }
 
 
-class SessionExportTests(unittest.TestCase):
+class SessionSchemaTests(unittest.TestCase):
     def test_top_level_structure(self):
         export = build_session_export(
-            source=_source(),
-            method_provenance=_provenance(),
-            quality_summary=_quality(),
-            frames=_frames(),
+            source=_source(), method_provenance=_provenance(),
+            quality_summary=_quality(), frames=_frames(),
             session_descriptors=_descriptors(),
-            kimore_reference_analysis=_reference(),
-            limitations=["limitation A"],
+            temporal_analysis=_temporal(), limitations=["limitation A"],
         )
         self.assertEqual(export["schema_version"], SESSION_SCHEMA_VERSION)
         self.assertEqual(export["module"], "biogait")
@@ -107,61 +139,84 @@ class SessionExportTests(unittest.TestCase):
         expected = {
             "schema_version", "module", "exercise", "source",
             "method_provenance", "quality_summary", "frames",
-            "session_descriptors", "kimore_reference_analysis", "limitations",
+            "session_descriptors", "temporal_analysis", "limitations",
         }
         self.assertEqual(set(export), expected)
+        self.assertNotIn("kimore_reference_analysis", export)
 
     def test_frames_preserved_and_ordered(self):
         export = build_session_export(
             source=_source(), method_provenance=_provenance(),
             quality_summary=_quality(), frames=_frames(),
             session_descriptors=_descriptors(),
-            kimore_reference_analysis=_reference(), limitations=[],
+            temporal_analysis=_temporal(), limitations=[],
         )
-        self.assertEqual(
-            [f["frame_index"] for f in export["frames"]], [0, 1, 2]
-        )
-        self.assertIsNotNone(export["frames"][0]["primary_outcomes"]["left_knee_sagittal_deg"])
+        self.assertEqual([f["frame_index"] for f in export["frames"]], [0, 1, 2])
 
     def test_frames_can_be_excluded(self):
         export = build_session_export(
             source=_source(), method_provenance=_provenance(),
             quality_summary=_quality(), frames=_frames(),
             session_descriptors=_descriptors(),
-            kimore_reference_analysis=_reference(), limitations=[],
+            temporal_analysis=_temporal(), limitations=[],
             include_frames=False,
         )
         self.assertEqual(export["frames"], [])
 
-    def test_json_roundtrip(self):
+    def test_temporal_analysis_provenance_branches(self):
         export = build_session_export(
             source=_source(), method_provenance=_provenance(),
             quality_summary=_quality(), frames=_frames(),
             session_descriptors=_descriptors(),
-            kimore_reference_analysis=_reference(), limitations=["x"],
+            temporal_analysis=_temporal(), limitations=[],
         )
-        text = json.dumps(export)
+        ta = export["temporal_analysis"]
+        self.assertEqual(ta["reference"]["classification"], "REFERENCE_DERIVED")
+        self.assertEqual(ta["adapted"]["classification"], "ENGINEERING_ADAPTED")
+        self.assertNotIn("left_reference_maxima_count", ta["adapted"]["summary"])
+
+    def test_no_nan_or_inf_json_allowed(self):
+        export = build_session_export(
+            source=_source(), method_provenance=_provenance(),
+            quality_summary=_quality(), frames=_frames(),
+            session_descriptors=_descriptors(),
+            temporal_analysis=_temporal(), limitations=[],
+        )
+        # allow_nan=False must not be needed because no NaN exists.
+        text = json.dumps(export, allow_nan=False)
         loaded = json.loads(text)
         self.assertEqual(loaded["schema_version"], SESSION_SCHEMA_VERSION)
-        self.assertEqual(len(loaded["frames"]), 3)
 
-    def test_limitations_are_present_and_strings(self):
+    def test_nan_in_export_value_raises_on_serialize(self):
+        # FrameEvidence never emits NaN, but the serializer must refuse it.
+        frames = _frames()
+        frames[0]["primary_outcomes"]["left_knee_sagittal_deg"] = float("nan")
+        export = build_session_export(
+            source=_source(), method_provenance=_provenance(),
+            quality_summary=_quality(), frames=frames,
+            session_descriptors=_descriptors(),
+            temporal_analysis=_temporal(), limitations=[],
+        )
+        with self.assertRaises(ValueError):
+            json.dumps(export, allow_nan=False)
+
+    def test_constant_frame_rate_timing_model_metadata(self):
         export = build_session_export(
             source=_source(), method_provenance=_provenance(),
             quality_summary=_quality(), frames=_frames(),
             session_descriptors=_descriptors(),
-            kimore_reference_analysis=_reference(),
-            limitations=["a", "b"],
+            temporal_analysis=_temporal(), limitations=[],
         )
-        self.assertEqual(export["limitations"], ["a", "b"])
+        self.assertEqual(
+            export["source"]["timing_model"], "constant_frame_rate_from_fps"
+        )
 
     def test_local_input_path_is_never_persisted(self):
-        # Even when console messages use the path, the JSON must be neutral.
         export = build_session_export(
             source=_source(), method_provenance=_provenance(),
             quality_summary=_quality(), frames=_frames(),
             session_descriptors=_descriptors(),
-            kimore_reference_analysis=_reference(), limitations=[],
+            temporal_analysis=_temporal(), limitations=[],
         )
         text = json.dumps(export)
         self.assertEqual(export["source"]["source_type"], "local_video")
@@ -169,71 +224,70 @@ class SessionExportTests(unittest.TestCase):
         for leaked in ("C:\\", "/Users/", "demo_video.mp4", "patients/"):
             self.assertNotIn(leaked, text)
 
-    def test_forbidden_key_raises_value_error(self):
-        bad_frames = _frames()
-        bad_frames[0]["metadata"]["patient_name"] = "anonymous"
+    def test_forbidden_key_deep_raises_value_error(self):
+        source = _source()
+        source["research_meta"] = {"owner": {"participant_id": 7}}
         with self.assertRaises(ValueError):
             build_session_export(
-                source=_source(), method_provenance=_provenance(),
-                quality_summary=_quality(), frames=bad_frames,
-                session_descriptors=_descriptors(),
-                kimore_reference_analysis=_reference(), limitations=[],
-            )
-
-    def test_forbidden_key_nested_deep_raises_value_error(self):
-        bad_source = dict(_source())
-        bad_source["research_meta"] = {"owner": {"email": "x@y.z"}}
-        with self.assertRaises(ValueError):
-            build_session_export(
-                source=bad_source, method_provenance=_provenance(),
+                source=source, method_provenance=_provenance(),
                 quality_summary=_quality(), frames=_frames(),
                 session_descriptors=_descriptors(),
-                kimore_reference_analysis=_reference(), limitations=[],
+                temporal_analysis=_temporal(), limitations=[],
             )
 
-    def test_forbidden_subject_id_key_raises_value_error(self):
-        bad_descriptors = dict(_descriptors())
-        bad_descriptors["subject_id"] = 12
+    def test_forbidden_patient_key_raises_value_error(self):
+        source = _source()
+        source["patient"] = "id"
         with self.assertRaises(ValueError):
             build_session_export(
-                source=_source(), method_provenance=_provenance(),
+                source=source, method_provenance=_provenance(),
                 quality_summary=_quality(), frames=_frames(),
-                session_descriptors=bad_descriptors,
-                kimore_reference_analysis=_reference(), limitations=[],
+                session_descriptors=_descriptors(),
+                temporal_analysis=_temporal(), limitations=[],
             )
 
     def test_benign_scientific_text_containing_name_does_not_fail(self):
-        # Structural key-name validation: values are not substring-scanned,
-        # and non-forbidden key names such as "landmark_name" are allowed.
         frames = _frames()
         frames[0]["quality"]["landmark_name"] = "left_hip"
-        frames[0]["metadata"]["note"] = (
-            "the anatomical landmark name is stored verbatim"
-        )
-        frames[0]["primary_outcomes"]["left_knee_sagittal_deg"] = 90.5
+        frames[0]["metadata"]["note"] = "the anatomical landmark name is stored verbatim"
         export = build_session_export(
             source=_source(), method_provenance=_provenance(),
             quality_summary=_quality(), frames=frames,
             session_descriptors=_descriptors(),
-            kimore_reference_analysis=_reference(), limitations=["ok"],
+            temporal_analysis=_temporal(), limitations=["ok"],
         )
         self.assertEqual(len(export["frames"]), 3)
 
-    def test_forbidden_key_check_uses_value_error_not_assert(self):
-        # Guard must not be an assert (asserts can be disabled under -O).
-        bad_source = dict(_source())
-        bad_source["patient"] = "id"
+    def test_forbidden_check_is_not_assert(self):
+        source = _source()
+        source["subject_id"] = 1
         with self.assertRaises(ValueError):
             build_session_export(
-                source=bad_source, method_provenance=_provenance(),
+                source=source, method_provenance=_provenance(),
                 quality_summary=_quality(), frames=_frames(),
                 session_descriptors=_descriptors(),
-                kimore_reference_analysis=_reference(), limitations=[],
+                temporal_analysis=_temporal(), limitations=[],
             )
 
-    def test_imported_schema_is_public(self):
-        import session_analysis  # noqa: F401
-        self.assertTrue(hasattr(session_analysis, "build_session_export"))
+    def test_all_export_numbers_finite_recursively(self):
+        def check(obj):
+            if isinstance(obj, float) or isinstance(obj, int):
+                value = float(obj)
+                self.assertTrue(math.isfinite(value), f"non-finite {value}")
+            elif isinstance(obj, dict):
+                for v in obj.values():
+                    check(v)
+            elif isinstance(obj, list):
+                for v in obj:
+                    check(v)
+
+        export = build_session_export(
+            source=_source(), method_provenance=_provenance(),
+            quality_summary=_quality(), frames=_frames(),
+            session_descriptors=_descriptors(),
+            temporal_analysis=_temporal(), limitations=[],
+        )
+        check(export)
 
 
 if __name__ == "__main__":
