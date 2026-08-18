@@ -28,7 +28,7 @@ SmartCPET-RehabGuard is a dual-module research system developed at Khulna Univer
 | Module | Purpose | Key Technologies |
 |--------|---------|-----------------|
 | **CPET** (`cpet/`) | Cardiopulmonary exercise testing — real-time ECG, SpO₂, HRV, ventilatory efficiency | Arduino, Raspberry Pi, FastAPI, Socket.IO, Next.js, TensorFlow/Keras |
-| **BioGait** (`biogait/`) | RGB camera-based movement analysis — pose landmarks, gait symmetry, screening | OpenCV, MediaPipe Pose, PyQt5 |
+| **BioGait** (`biogait/`) | RGB camera-based movement analysis — pose landmarks, left-right symmetry, screening | OpenCV, MediaPipe Pose, PyQt5 |
 
 ---
 
@@ -71,7 +71,7 @@ CO₂, Airflow              Arrhythmia model                   patient records
 
 ### Key Features
 - Real-time 5-class arrhythmia detection (CNN trained on MIT-BIH)
-- 5 clinical CPET parameters: LRC Ratio, SpO₂/HR, LF/HF, PTT, VE/VCO₂
+- 5 derived CPET-related parameters: LRC Ratio, SpO₂/HR, LF/HF, PTT, VE/VCO₂
 - 2-minute screening test workflow
 - Multi-sensor fusion: ECG, PPG/SpO₂, MPU6050 IMU, MQ-135 CO₂
 - Mobile-responsive dark/light theme dashboard
@@ -104,21 +104,25 @@ The primary conference runtime is the PyQt5 desktop application:
 ```bash
 cd biogait
 pip install -r requirements.txt
-python app_qt.py    # primary: Qt desktop with live waveform + metrics
+python app_qt.py    # primary: Qt desktop with live video + movement metrics
 ```
+
+The Qt runtime does **not** render an ECG-style waveform. It shows live camera feed with MediaPipe pose skeleton overlay plus a metrics panel with sparklines.
 
 ### Legacy Pipeline
 
-`app.py` is a legacy OpenCV-based runtime that writes metrics to `latest_metrics.json` and CSV files.
+`app.py` is a legacy OpenCV-based runtime that writes metrics to `latest_metrics.json` and CSV files. It is **separate** from the Qt runtime.
 
 `dashboard.py` is a legacy Streamlit companion that reads the JSON file produced by `app.py`. It is **not** currently fed by `app_qt.py`.
 
+**Session metrics logging** (CSV/JSON files) is performed by the legacy `app.py` pipeline only, not by the primary Qt runtime.
+
 ### Key Features
 - Real-time pose landmark detection (MediaPipe PoseLandmarker)
-- Knee angle, trunk lean, left-right asymmetry calculation
+- Knee angle, trunk lean, left-right asymmetry calculation (single-frame, no gait-cycle temporal analysis)
 - Risk scoring (0–100) — **legacy rule-based heuristic, not clinically validated**
 - IP camera and laptop webcam support
-- Session metrics logging
+- Movement analysis and movement screening (no gait-cycle temporal segmentation yet)
 
 ### Key Evidence
 

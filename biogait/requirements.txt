@@ -1,6 +1,14 @@
 # BioGait — Python Dependencies
 # Primary runtime: app_qt.py (PyQt5 desktop)
 # Legacy runtime: app.py (OpenCV + Streamlit dashboard)
+#
+# ── Version status ────────────────────────────────────────────────────────────
+# The compatibility ranges below are NOT verified-working pins. They are
+# reasonable lower-bound ranges selected for Python 3.10 / 3.11 compatibility,
+# based on import analysis + PyPI metadata.
+#
+# Exact reproducibility lock is pending a clean environment verification step.
+# Do not interpret these ranges as guaranteed-working pinned versions.
 
 # ── Core (both runtimes) ──────────────────────────────────────────────────────
 mediapipe>=0.10.9,<2.0

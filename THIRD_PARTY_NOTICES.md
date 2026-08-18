@@ -8,23 +8,29 @@ This document lists third-party software and data used by SmartCPET-RehabGuard. 
 
 - **Component:** PoseLandmarker model (`biogait/pose_landmarker_lite.task`)
 - **Source:** https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task
-- **Governing License:** Apache License 2.0 (MediaPipe framework)
+- **Governing License:**
+  - **MediaPipe framework / Python package:** Apache License 2.0
+  - **PoseLandmarker model artifact** (`pose_landmarker_lite.task`): Official Google-hosted pretrained model asset. Model artifact redistribution/license terms: **pending explicit verification**. Users must verify the model artifact license directly with Google before any redistribution.
 - **Use:** Pose landmark extraction only. Not used for any clinical decision-making.
 - **Not a rehabilitation-quality model.** This is a general-purpose pretrained pose model.
-
-The MediaPipe Python package (`mediapipe`) is distributed under the Apache License 2.0.
 
 ---
 
 ## MIT-BIH Arrhythmia Database
 
 - **Component:** Training dataset for `cpet/backend/arrhythmia_cnn_final.keras` and `cpet/backend/best_arrhythmia_model.keras`
-- **Source:** MIT-BIH Arrhythmia Database, PhysioNet
+- **Name:** MIT-BIH Arrhythmia Database
+- **Source:** PhysioNet
+- **DOI:** 10.13026/C2F305
 - **URL:** https://physionet.org/content/mitdb/1.0.0/
-- **Access:** Free for research and educational use; redistribution requires PhysioNet policy compliance.
+- **License:** Open Data Commons Attribution License v1.0 (ODC-By 1.0)
 - **Bundled status:** Raw MIT-BIH distribution files are **not bundled** in this repository. Only trained model weights derived from the dataset are included.
 
-If you intend to retrain the CNN model, obtain the dataset directly from PhysioNet and comply with their redistribution policy.
+**Attribution statement:**
+
+> The arrhythmia CNN model weights included in this repository (`arrhythmia_cnn_final.keras`, `best_arrhythmia_model.keras`) were derived from the MIT-BIH Arrhythmia Database distributed by PhysioNet (DOI: 10.13026/C2F305), licensed under ODC-By 1.0. The authors gratefully acknowledge PhysioNet and the original contributors of the MIT-BIH Arrhythmia Database.
+
+If you intend to retrain the CNN model, obtain the dataset directly from PhysioNet and comply with the ODC-By 1.0 attribution requirements.
 
 ---
 
@@ -69,8 +75,11 @@ If you intend to retrain the CNN model, obtain the dataset directly from PhysioN
 ## PyQt5
 
 - **Component:** `biogait/app_qt.py`, `biogait/ui_widgets.py`, `biogait/ui_worker.py` (primary BioGait runtime)
-- **License:** GPL v3 / Riverbank Commercial License
-- **Note:** PyQt5 is dual-licensed. For open-source research prototypes, GPL applies. Commercial deployment requires a commercial license from Riverbank Computing.
+- **License:** PyQt5 is dual-licensed by Riverbank Computing Limited under:
+  - **GNU General Public License (GPL) v3**, or
+  - **Riverbank Commercial License**
+- **Note:** The choice between these two licenses must be made by the application author/distributor. Merely being a research prototype does not automatically resolve GPL obligations. The final repository/application licensing must be compatible with the applicable PyQt license, or an appropriate Riverbank Commercial License must be obtained.
+- **Reference:** https://www.riverbankcomputing.com/software/pyqt/
 
 ---
 
