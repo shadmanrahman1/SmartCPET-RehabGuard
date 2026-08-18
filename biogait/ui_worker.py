@@ -25,6 +25,7 @@ from PyQt5.QtGui import QImage
 
 import config
 from metrics import add_session_fields, calculate_pose_metrics, no_pose_metrics
+from evidence_features import build_frame_evidence, extract_world_landmarks
 from runtime_utils import (
     MonotonicClock,
     ReconnectPolicy,
@@ -34,6 +35,7 @@ from runtime_utils import (
     open_camera,
     reconnect_capture,
 )
+from session_analysis import SessionAccumulator, descriptive_temporal_features
 
 # ── Skeleton drawing constants ────────────────────────────────────────────────
 # Landmark indices that we care about (PoseLandmark enum values)
@@ -136,6 +138,7 @@ class CameraWorker(QObject):
     frame_ready   = pyqtSignal(QImage)
     metrics_ready = pyqtSignal(dict)
     status_ready  = pyqtSignal(str)
+    evidence_ready = pyqtSignal(dict)
 
     def __init__(self, camera_source: Any) -> None:
         super().__init__()
@@ -143,6 +146,9 @@ class CameraWorker(QObject):
         self._running  = False
         self._frame_i  = 0
         self._last_mts = 0.0
+        # Rolling research-evidence window (display-history only; not a
+        # clinical or temporal feature store).
+        self._evidence_acc = SessionAccumulator(max_frames=300)
 
     def run(self) -> None:
         self._running = True
@@ -212,16 +218,25 @@ class CameraWorker(QObject):
                 ts_ms = clock.video_timestamp_ms()
                 result = landmarker.detect_for_video(mp_image, ts_ms)
 
+                elapsed = clock.elapsed_seconds()
+
                 if result.pose_landmarks:
                     _draw_skeleton(rgb, result)
                     lms     = _extract_landmarks(result)
                     metrics = calculate_pose_metrics(lms)
                     emit_status("TRACKING")
+
+                    # M2 research evidence (world landmarks); legacy metrics
+                    # above are left untouched.
+                    world = extract_world_landmarks(result)
+                    evidence = build_frame_evidence(
+                        world, self._frame_i, elapsed
+                    )
+                    self._evidence_acc.add(evidence.to_dict())
                 else:
                     metrics = no_pose_metrics()
                     emit_status("NO_POSE")
 
-                elapsed = clock.elapsed_seconds()
                 metrics = add_session_fields(metrics, self._frame_i, elapsed)
 
                 h, w, ch = rgb.shape
@@ -231,6 +246,7 @@ class CameraWorker(QObject):
                 now = clock.elapsed_seconds()
                 if now - self._last_mts >= config.LATEST_WRITE_INTERVAL_SECONDS:
                     self.metrics_ready.emit(metrics)
+                    self._emit_evidence()
                     self._last_mts = now
         finally:
             if current_cap is not None:
@@ -262,6 +278,37 @@ class CameraWorker(QObject):
 
     def _should_stop(self) -> bool:
         return not self._running
+
+    def _emit_evidence(self) -> None:
+        """Emit a compact research-evidence payload for the UI panel.
+
+        Descriptive only — no clinical scores, pass/fail, or colour
+        semantics. Uses the rolling evidence window for session ROM.
+        """
+        arrays = self._evidence_acc.finite_arrays()
+        descriptors = descriptive_temporal_features(arrays)
+        last = None
+        for frame in reversed(self._evidence_acc.frames()):
+            if frame["quality"].get("available"):
+                last = frame
+                break
+        total = self._evidence_acc.total_added
+        available = self._evidence_acc.available_count
+
+        payload = {
+            "left_knee_sagittal_deg": (
+                last["primary_outcomes"]["left_knee_sagittal_deg"] if last else None
+            ),
+            "right_knee_sagittal_deg": (
+                last["primary_outcomes"]["right_knee_sagittal_deg"] if last else None
+            ),
+            "available": bool(last is not None),
+            "quality": (last["quality"] if last else {}),
+            "availability_rate": (available / total if total else None),
+            "left_knee_rom_deg": descriptors.get("left_knee_rom_deg"),
+            "right_knee_rom_deg": descriptors.get("right_knee_rom_deg"),
+        }
+        self.evidence_ready.emit(payload)
 
     def stop(self) -> None:
         self._running = False

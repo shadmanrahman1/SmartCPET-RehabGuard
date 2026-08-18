@@ -1,0 +1,123 @@
+# KIMORE Exercise 5 (Squat) — BioGait Evidence Row
+
+> Method provenance: **REFERENCE_DERIVED / ENGINEERING_ADAPTED / DESCRIPTIVE**
+> as labelled per component below. Sections are locked scientific decisions
+> for Sprint A and are implemented in `biogait/`.
+
+## Reference
+
+- **Paper:** Capecci et al., 2019. *The KIMORE Dataset: KInematic Assessment of
+  MOvement and Clinical Scores for Remote Monitoring of Physical
+  REhabilitation*. IEEE Transactions on Neural Systems and Rehabilitation
+  Engineering.
+- **DOI:** [10.1109/TNSRE.2019.2923060](https://doi.org/10.1109/TNSRE.2019.2923060)
+- **Reviewed source implementation:** `petteriTeikari/KiMoRe_wrapper`
+  - `matlab/matlab_original/feat_extract_Ex5.m`
+  - `matlab/matlab_original/filtering.m`
+
+## Original context (KIMORE)
+
+- KIMORE measures motor performance in physical rehabilitation with a
+  **Kinect RGB-D sensor** providing high-confidence 3D skeletal coordinates.
+- Exercise 5 is a **squat** (repeated knee flexion/extension).
+- Clinical scores in KIMORE come from clinician assessments and validated
+  scales (e.g., Fugl-Meyer) — **not** automatically from the raw kinematics.
+
+## BioGait adaptation context
+
+- BioGait uses **monocular RGB** inference via MediaPipe PoseLandmarker
+  (`pose_landmarker_lite.task`), producing both normalized image landmarks and
+  **world landmarks** (metric, camera-centered).
+- The research pipeline consumes **world landmarks** when available.
+- MediaPipe **WRIST is a proxy** for the KIMORE **Hand** joint; it is an
+  ENGINEERING_ADAPTED proxy, not an exact kinematic Hand equivalent.
+
+> **BioGait is KIMORE-informed rather than a direct KIMORE reproduction.
+> KIMORE uses Kinect-derived 3D skeletal measurements, whereas BioGait uses
+> MediaPipe world landmarks inferred from monocular RGB. Numerical equivalence
+> and clinical validity are not assumed.**
+
+## PO mapping (Primary Outcomes)
+
+| KIMORE concept | BioGait implementation | Classification |
+|----------------|------------------------|----------------|
+| Sagittal knee angle | `kimore_sagittal_knee_angle_yz(hip, knee, ankle)` in the Y-Z plane, degrees; left and right share the same math | ENGINEERING_ADAPTED |
+
+- No correct/incorrect labels are produced.
+- Values are `None` (never 0) when evidence is unavailable; no fake
+  measurements are generated.
+
+## CF mapping (Control Factors)
+
+| KIMORE concept | BioGait implementation | Classification |
+|----------------|------------------------|----------------|
+| Hand distance | wrist-to-wrist Euclidean 3D distance (wrist = Hand proxy) | ENGINEERING_ADAPTED |
+| Shoulder width | shoulder-to-shoulder distance | ENGINEERING_ADAPTED |
+| Hip width | hip-to-hip distance | ENGINEERING_ADAPTED |
+| Knee width | knee-to-knee distance | ENGINEERING_ADAPTED |
+| Ankle width | ankle-to-ankle distance | ENGINEERING_ADAPTED |
+| Hand-shoulder distance | left/right wrist-to-shoulder distances | ENGINEERING_ADAPTED |
+| Torso area | quadrilateral LS-RS-RH-LH decomposed into two Heron triangles | ENGINEERING_ADAPTED |
+
+## Filtering
+
+- **Reference (offline):** Butterworth, order 3, cutoff 1 Hz, sample rate
+  30 Hz, applied with `sosfiltfilt` (zero-phase, non-causal — the documented
+  SOS form of MATLAB/`scipy` `filtfilt`).
+  Classification: REFERENCE_DERIVED / OFFLINE ONLY / NON-CAUSAL.
+- **Causal adaptation:** `CausalKimoreButterworth` — stateful SOS filtering.
+  Classification: ENGINEERING_ADAPTED. Not `filtfilt`-equivalent, introduces
+  phase delay, not clinically validated.
+
+## Reference temporal analysis
+
+Offline reference path describing the KIMORE Ex5 event-extraction convention:
+
+1. remove the initial 10 samples from the knee-angle stream;
+2. sign correction when a consecutive angle difference exceeds 100°;
+3. `filtfilt` reference filter;
+4. maxima at `max(signal)/√2`;
+5. minima on `max(signal) − signal` at `max(transformed)/√2`;
+6. minimum peak distance `⌊n/10⌋`.
+
+- Detected events are **candidate** repetition events — **not** clinically
+  valid repetitions — and the path produces no pass/fail.
+- The KIMORE acquisition protocol involved repeated exercise execution; its
+  full-sequence peak settings are **not automatically valid** for an
+  arbitrary live session length.
+
+Classification: REFERENCE_DERIVED / OFFLINE / NOT REALTIME.
+
+## Descriptive metrics
+
+- Session duration, effective sample rate.
+- Left/right knee ROM (max−min, degrees).
+- Left/right angular velocity (finite difference Δangle/Δt), peak and mean
+  absolute values.
+- Left-right ROM difference.
+- Reference event-candidate count and candidate repetition durations.
+
+These are **descriptive kinematics only** — not clinical risk, pass/fail,
+rehabilitation scores, or movement-quality scores.
+
+## Claim boundaries
+
+- No component in this document claims clinical validity.
+- No component produces a clinical diagnosis or rehabilitation quality score.
+- The legacy BioGait risk gauge remains a separate, visually labelled
+  experimental non-clinical baseline.
+- Offline reference analysis is unsuitable as a realtime causal decision path.
+
+## Implementation files
+
+- `biogait/evidence_features.py` — extraction, geometry, frame evidence schema
+- `biogait/temporal_filters.py` — reference + causal filters
+- `biogait/reference_temporal.py` — offline KIMORE Ex5 reference analysis
+- `biogait/session_analysis.py` — accumulator, descriptive features, export
+- `biogait/analyze_video.py` — offline video analyzer CLI
+
+## Validation status
+
+None for all components (REFERENCE_DERIVED / ENGINEERING_ADAPTED /
+DESCRIPTIVE). Internal unit tests cover geometry, filtering, and session
+logic with deterministic synthetic data; no clinical claims are made.

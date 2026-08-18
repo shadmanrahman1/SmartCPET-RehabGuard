@@ -21,7 +21,7 @@ import config
 from ui_widgets import (
     BG_CARD, BG_DARK, BG_PANEL, BORDER, RISK_COLORS,
     STATUS_COLORS, TEXT_PRI, TEXT_SEC,
-    MetricCard, ReasonsBox, RiskGauge, SparklineChart,
+    MetricCard, ReasonsBox, ResearchEvidencePanel, RiskGauge, SparklineChart,
 )
 from ui_worker import CameraWorker
 
@@ -126,6 +126,14 @@ class DashboardPanel(QWidget):
         self._gauge = RiskGauge()
         lay.addWidget(self._gauge)
 
+        gauge_cap = QLabel("Legacy experimental baseline — not clinically validated")
+        gauge_cap.setStyleSheet(f"color:{TEXT_SEC}; font-size:9px;")
+        lay.addWidget(gauge_cap)
+
+        # ── research evidence (KIMORE-informed, descriptive only) ────────────
+        self._research = ResearchEvidencePanel()
+        lay.addWidget(self._research)
+
         # ── metric cards (2 × 2) ─────────────────────────────────────────────
         self._lk    = MetricCard("Left Knee",  " °")
         self._rk    = MetricCard("Right Knee", " °")
@@ -190,6 +198,9 @@ class DashboardPanel(QWidget):
         self._sk_rk.add(rk)
         self._sk_trunk.add(trunk)
 
+    def update_research_evidence(self, payload: dict) -> None:
+        self._research.update_research_evidence(payload)
+
 
 # ── Main Window ───────────────────────────────────────────────────────────────
 class MainWindow(QMainWindow):
@@ -226,6 +237,7 @@ class MainWindow(QMainWindow):
         self._worker.frame_ready.connect(self._video.update_frame)
         self._worker.metrics_ready.connect(self._dashboard.update_metrics)
         self._worker.status_ready.connect(self._video.update_status)
+        self._worker.evidence_ready.connect(self._dashboard.update_research_evidence)
 
         self._thread.start()
 
