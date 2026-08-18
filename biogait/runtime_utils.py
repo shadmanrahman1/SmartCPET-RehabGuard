@@ -12,11 +12,18 @@ It provides small, unit-testable primitives used by ui_worker.py:
 """
 from __future__ import annotations
 
+import platform
+import sys
 import time
 from typing import Any, Callable, Optional
 
 
 SLEEP_CHUNK_SECONDS = 0.05
+
+
+def _is_windows() -> bool:
+    """Report whether we are on a Windows platform (e.g. win32, cygwin)."""
+    return sys.platform.startswith("win") or platform.system() == "Windows"
 
 
 def _cv2():
@@ -141,12 +148,13 @@ class ReconnectPolicy:
 def open_camera(source: Any) -> Optional["cv2.VideoCapture"]:
     """Open a camera source, or return None if it cannot be opened.
 
-    - Integer index (webcam): try ``CAP_DSHOW`` first on Windows, then fall
-      back to the default backend.
+    - Integer index (webcam): on Windows, try ``CAP_DSHOW`` first, then fall
+      back to the default backend. On non-Windows, use the default backend
+      directly.
     - String URL/IP source: use the default backend.
     """
     cv2 = _cv2()
-    if isinstance(source, int):
+    if isinstance(source, int) and _is_windows():
         dshow = getattr(cv2, "CAP_DSHOW", None)
         if dshow is not None:
             cap = cv2.VideoCapture(source, dshow)
@@ -160,6 +168,81 @@ def open_camera(source: Any) -> Optional["cv2.VideoCapture"]:
     if not cap.isOpened():
         cap.release()
         return None
+    return cap
+
+
+# ── Status emitter (dedup + return value) ─────────────────────────────────────
+
+def make_status_emitter(guard: StatusGuard, emit: Callable[[str], None]) -> Callable[[str], bool]:
+    """Wrap a status emission callback with deduplication.
+
+    The returned callable calls ``emit(status)`` only when ``guard`` reports a
+    real status change, and returns True when the status actually changed.
+    """
+
+    def emit_status(new_status: str) -> bool:
+        changed = guard.update(new_status)
+        if changed:
+            emit(new_status)
+        return changed
+
+    return emit_status
+
+
+# ── Reconnect / capture ownership ──────────────────────────────────────────────
+
+def reconnect_capture(
+    reconnect: ReconnectPolicy,
+    emit: Callable[[str], bool],
+    open_camera_fn: Callable[[], Any],
+    sleep_fn: Callable[[float, Callable[[], bool]], bool],
+    stop_fn: Callable[[], bool],
+    cap: Any,
+    retry_pause_seconds: float,
+    pause_reset_seconds: float,
+) -> Any:
+    """Handle one failed frame read with bounded reconnect recovery.
+
+    Takes ownership of ``cap`` for the duration of this call and returns the
+    capture that should remain the *current* capture afterwards:
+
+    - Transient failure (below threshold): emits ``NO_SIGNAL``, sleeps
+      ``retry_pause_seconds``, returns ``cap`` unchanged.
+    - At the failure threshold: emits ``RECONNECTING``, backs off, then
+      attempts ``open_camera_fn()``. On success the old capture is released
+      and the replacement is returned. On failure ``NO_SIGNAL`` is emitted and
+      the current capture is returned unchanged.
+    - Exhausted reconnect attempts: pauses ``pause_reset_seconds``, resets the
+      reconnect counter, returns the current capture unchanged.
+
+    The caller is responsible for releasing the returned capture when the
+    stream/loop exits — including any replacement obtained during a reconnect.
+    """
+    if reconnect.on_frame_failed():
+        emit("RECONNECTING")
+        delay = reconnect.reconnect_delay()
+        if delay is None:
+            # Bounded attempts exhausted for this stretch; pause, then reset.
+            emit("NO_SIGNAL")
+            if not sleep_fn(pause_reset_seconds, stop_fn):
+                return cap
+            reconnect.reset_reconnect()
+            return cap
+        if not sleep_fn(delay, stop_fn):
+            return cap
+        emit("CONNECTING")
+        new_cap = open_camera_fn()
+        if new_cap is not None:
+            cap.release()
+            cap = new_cap
+            # Reopen success only means frames may become available. The next
+            # frame read decides TRACKING / NO_POSE / NO_SIGNAL.
+        else:
+            emit("NO_SIGNAL")
+        return cap
+
+    emit("NO_SIGNAL")
+    sleep_fn(retry_pause_seconds, stop_fn)
     return cap
 
 

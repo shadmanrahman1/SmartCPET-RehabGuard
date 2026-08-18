@@ -30,7 +30,9 @@ from runtime_utils import (
     ReconnectPolicy,
     StatusGuard,
     interruptible_sleep,
+    make_status_emitter,
     open_camera,
+    reconnect_capture,
 )
 
 # ── Skeleton drawing constants ────────────────────────────────────────────────
@@ -147,13 +149,10 @@ class CameraWorker(QObject):
         status = StatusGuard()
         clock = MonotonicClock()
 
-        def emit_status(new_status: str) -> None:
-            if status.update(new_status):
-                self.status_ready.emit(new_status)
+        emit_status = make_status_emitter(status, self.status_ready.emit)
 
         emit_status("CONNECTING")
 
-        cap = None
         try:
             model_path = _ensure_model()
             landmarker = _build_landmarker(model_path)
@@ -165,17 +164,14 @@ class CameraWorker(QObject):
                     emit_status("ERROR")
                     return
 
-                try:
-                    self._stream_loop(cap, landmarker, clock, emit_status)
-                finally:
-                    cap.release()
-                    cap = None
+                # Ownership of `cap` is transferred to _stream_loop(), which
+                # guarantees the currently active capture (including any
+                # replacement created during reconnect) is released on exit.
+                self._stream_loop(cap, landmarker, clock, emit_status)
         except Exception as exc:
             print(f"[BioGait] ERROR: {type(exc).__name__}: {exc}")
             emit_status("ERROR")
         finally:
-            if cap is not None:
-                cap.release()
             self._running = False
             emit_status("STOPPED")
 
@@ -190,80 +186,79 @@ class CameraWorker(QObject):
         self._frame_i = 0
         self._last_mts = 0.0
 
-        while self._running:
-            ok, frame = cap.read()
-            if not ok:
-                cap = self._handle_read_failure(cap, reconnect, emit_status)
-                continue
+        current_cap = cap  # _stream_loop owns the current capture from here on.
+        try:
+            while self._running:
+                ok, frame = current_cap.read()
+                if not ok:
+                    current_cap = self._handle_read_failure(
+                        current_cap, reconnect, emit_status
+                    )
+                    continue
 
-            reconnect.on_frame_ok()
-            self._frame_i += 1
+                reconnect.on_frame_ok()
+                self._frame_i += 1
 
-            if isinstance(self._source, int) and config.MIRROR_LAPTOP_WEBCAM:
-                frame = cv2.flip(frame, 1)
+                if isinstance(self._source, int) and config.MIRROR_LAPTOP_WEBCAM:
+                    frame = cv2.flip(frame, 1)
 
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-            # Build mediapipe Image from frame bytes
-            mp_image = mp.Image(
-                image_format=mp.ImageFormat.SRGB,
-                data=rgb,
-            )
-            ts_ms = clock.video_timestamp_ms()
-            result = landmarker.detect_for_video(mp_image, ts_ms)
+                # Build mediapipe Image from frame bytes
+                mp_image = mp.Image(
+                    image_format=mp.ImageFormat.SRGB,
+                    data=rgb,
+                )
+                ts_ms = clock.video_timestamp_ms()
+                result = landmarker.detect_for_video(mp_image, ts_ms)
 
-            if result.pose_landmarks:
-                _draw_skeleton(rgb, result)
-                lms     = _extract_landmarks(result)
-                metrics = calculate_pose_metrics(lms)
-                emit_status("TRACKING")
-            else:
-                metrics = no_pose_metrics()
-                emit_status("NO_POSE")
+                if result.pose_landmarks:
+                    _draw_skeleton(rgb, result)
+                    lms     = _extract_landmarks(result)
+                    metrics = calculate_pose_metrics(lms)
+                    emit_status("TRACKING")
+                else:
+                    metrics = no_pose_metrics()
+                    emit_status("NO_POSE")
 
-            elapsed = clock.elapsed_seconds()
-            metrics = add_session_fields(metrics, self._frame_i, elapsed)
+                elapsed = clock.elapsed_seconds()
+                metrics = add_session_fields(metrics, self._frame_i, elapsed)
 
-            h, w, ch = rgb.shape
-            img = QImage(rgb.tobytes(), w, h, ch * w, QImage.Format_RGB888).copy()
-            self.frame_ready.emit(img)
+                h, w, ch = rgb.shape
+                img = QImage(rgb.tobytes(), w, h, ch * w, QImage.Format_RGB888).copy()
+                self.frame_ready.emit(img)
 
-            now = clock.elapsed_seconds()
-            if now - self._last_mts >= config.LATEST_WRITE_INTERVAL_SECONDS:
-                self.metrics_ready.emit(metrics)
-                self._last_mts = now
+                now = clock.elapsed_seconds()
+                if now - self._last_mts >= config.LATEST_WRITE_INTERVAL_SECONDS:
+                    self.metrics_ready.emit(metrics)
+                    self._last_mts = now
+        finally:
+            if current_cap is not None:
+                current_cap.release()
 
     def _handle_read_failure(self, cap, reconnect, emit_status):
-        """Bounded NO_SIGNAL -> RECONNECTING recovery for failed frame reads."""
-        if reconnect.on_frame_failed():
-            # Threshold reached: attempt a controlled reconnect.
-            if emit_status("RECONNECTING"):
-                print("[BioGait] WARN: repeated frame loss — attempting reconnect")
-            delay = reconnect.reconnect_delay()
-            if delay is None:
-                # Bounded attempts exhausted for this stretch; pause, then reset.
-                emit_status("NO_SIGNAL")
-                interruptible_sleep(
-                    config.RECONNECT_PAUSE_RESET_SECONDS, self._should_stop
-                )
-                reconnect.reset_reconnect()
-                return cap
-            if not interruptible_sleep(delay, self._should_stop):
-                return cap
-            emit_status("CONNECTING")
-            new_cap = open_camera(self._source)
-            if new_cap is not None:
-                cap.release()
-                cap = new_cap
-                emit_status("TRACKING")
-            else:
-                print("[BioGait] WARN: reconnect failed to reopen camera")
-                emit_status("NO_SIGNAL")
-            return cap
+        """Bounded NO_SIGNAL -> RECONNECTING recovery for failed frame reads.
 
-        emit_status("NO_SIGNAL")
-        interruptible_sleep(config.READ_RETRY_PAUSE_SECONDS, self._should_stop)
-        return cap
+        Delegates the decision to ``reconnect_capture``, which owns `cap`
+        for the duration of the attempt and returns the capture that should
+        remain current — releasing the old capture if it is replaced.
+        """
+        def emit_logged(new_status: str) -> bool:
+            changed = emit_status(new_status)
+            if changed and new_status == "RECONNECTING":
+                print("[BioGait] WARN: repeated frame loss — attempting reconnect")
+            return changed
+
+        return reconnect_capture(
+            reconnect,
+            emit_logged,
+            lambda: open_camera(self._source),
+            interruptible_sleep,
+            self._should_stop,
+            cap,
+            config.READ_RETRY_PAUSE_SECONDS,
+            config.RECONNECT_PAUSE_RESET_SECONDS,
+        )
 
     def _should_stop(self) -> bool:
         return not self._running

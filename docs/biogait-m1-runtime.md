@@ -85,7 +85,7 @@ RECONNECTING
    ↓ release capture
 reopen capture
    ↓ success
-CONNECTING → TRACKING
+CONNECTING → next frame read decides
 ```
 
 - Consecutive read failures count toward a threshold
@@ -95,8 +95,26 @@ CONNECTING → TRACKING
   capped at `RECONNECT_MAX_ATTEMPTS`).
 - When attempts are exhausted for a stretch, the worker pauses
   (`RECONNECT_PAUSE_RESET_SECONDS`) then resets — no infinite tight loop.
+- A successful reopen only means frames *may* become available: the worker
+  does **not** report `TRACKING` from camera-open success alone. The next
+  frame read decides `TRACKING` / `NO_POSE` / `NO_SIGNAL`.
 - All waiting uses `interruptible_sleep()`, which checks the stop flag in
   small chunks so the application can close promptly.
+
+### Capture ownership
+
+`run()` opens the initial capture and transfers ownership to
+`_stream_loop()`, which holds the *current* capture reference and releases
+whichever capture is active when the stream exits.
+
+**The currently active VideoCapture instance, including a replacement
+created during reconnect, is released on worker exit.** When a reconnect
+replaces the capture, the old instance is released at that moment and the
+replacement becomes the new current capture; there is no double ownership.
+
+The reconnect decision is delegated to a pure helper
+(`reconnect_capture()` in `runtime_utils.py`) so the ownership/release
+semantics are directly unit-testable without hardware or GUI.
 
 All values live in `biogait/config.py` under the explicit banner:
 
@@ -108,8 +126,10 @@ All values live in `biogait/config.py` under the explicit banner:
 
 New helper: `open_camera()` in `biogait/runtime_utils.py`.
 
-- Integer webcam index: attempts `CAP_DSHOW` first (Windows-friendly), falls
-  back to the default backend.
+- Integer webcam index on **Windows**: attempts `CAP_DSHOW` first, falls back
+  to the default backend if that fails.
+- Integer webcam index on **non-Windows** systems: uses the default backend
+  directly (no DSHOW attempt).
 - URL / IP source: uses the default `cv2.VideoCapture(source)`.
 - Returns `None` instead of an opened capture when all attempts fail.
 
@@ -136,8 +156,13 @@ UI is not flooded with an identical status every frame.
 
 ## Safe Shutdown / Resource Cleanup
 
-- The frame loop runs inside `try/finally`, so `cv2.VideoCapture.release()`
-  always runs on normal exit or exception.
+- `run()` opens the initial capture and transfers ownership to
+  `_stream_loop()`. The frame loop runs inside `try/finally`, so
+  `cv2.VideoCapture.release()` always runs on normal exit or exception.
+- **The currently active VideoCapture instance, including a replacement
+  created during reconnect, is released on worker exit.** When a reconnect
+  replaces the capture, the old instance is released at that moment; the
+  replacement becomes current and is released when the stream/shutdown exits.
 - The PoseLandmarker is used as a context manager, guaranteeing close.
 - `_running` is cleared in a `finally` block.
 - `stop()` sets `_running = False`; any in-progress retry/backoff wait is
@@ -175,10 +200,20 @@ logged.
   strictly increasing and non-negative.
 - **Status guard** — repeated identical statuses are not re-emitted; a state
   transition is reported.
-- **Camera open helper (mocked)** — integer webcam DSHOW preference, fallback
-  to default backend, URL source path, and all-fail → `None`.
+- **Status emitter (review regression)** — the wrapped emit callback returns
+  `True` on a real transition and `False` on a duplicate, and emits each
+  change only once.
+- **Camera open helper (mocked)** — Windows integer webcam DSHOW preference,
+  Windows fallback to default backend, non-Windows integer source using the
+  default backend directly, URL source path, and all-fail → `None`.
 - **Reconnect policy** — failure-threshold triggering, bounded backoff with no
   infinite loop, and full reset on a successful frame.
+- **Reconnect / ownership (review regression)** — reopen success does **not**
+  report `TRACKING`; original capture is released when replaced; replacement is
+  returned as current; failed/tired reconnects keep the current capture.
+- **Worker stream ownership (review regression)** — exercising `_stream_loop()`
+  with mocked dependencies verifies the active capture (including a reconnect
+  replacement) is released when the stream exits.
 - **Interruptible sleep** — completes normally when not stopped; interrupts
   promptly on stop.
 
