@@ -1,0 +1,86 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# SmartCPET-RehabGuard — Root .gitignore
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Python ─────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ── Node.js / Next.js ─────────────────────────────────────────────────────────
+node_modules/
+.next/
+out/
+.turbo/
+
+# npm debug logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# ── Secrets — NEVER commit these ──────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Build outputs ──────────────────────────────────────────────────────────────
+dist/
+*.tsbuildinfo
+next-env.d.ts
+
+# ── Caches ─────────────────────────────────────────────────────────────────────
+.cache/
+.npm/
+.mypy_cache/
+.ruff_cache/
+
+# ── OS / Editor noise ─────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.log
+.idea/
+.vscode/settings.json
+*.swp
+*.swo
+*~
+
+# ── BioGait runtime artifacts ──────────────────────────────────────────────────
+biogait/latest_metrics.json
+biogait/outputs/
+biogait/__pycache__/
+
+# ── CPET runtime artifacts ─────────────────────────────────────────────────────
+cpet/backend/__pycache__/
+cpet/web_dashboard/.next/
+cpet/web_dashboard/.cache/
+cpet/web_dashboard/stitch/
+
+# ── Large binary files (evaluate before committing) ───────────────────────────
+# *.keras
+# *.task
+# *.h5
+# *.pt
+# *.pth
+# *.onnx

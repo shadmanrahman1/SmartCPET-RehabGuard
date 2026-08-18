@@ -1,0 +1,110 @@
+┌─────────────────────────────────────────────────────────────┐
+│                 🏥 ECG DASHBOARD - QUICK START               │
+└─────────────────────────────────────────────────────────────┘
+
+📍 DASHBOARD RUNNING AT:
+   → http://localhost:3000/ecg-monitor
+
+🔗 NAVIGATION:
+   1. Open browser: http://localhost:3000
+   2. Click "ECG Monitor" in sidebar (❤️ Heart icon)
+   
+⚙️ REQUIRED SETUP:
+
+   Pi Server:
+   ┌────────────────────────────────────────────┐
+   │ ✓ Raspberry Pi running pi_server.py       │
+   │ ✓ Arduino connected via USB                │
+   │ ✓ Accessible at: 192.168.1.101:5000       │
+   └────────────────────────────────────────────┘
+
+   Dashboard:
+   ┌────────────────────────────────────────────┐
+   │ ✓ npm install (completed)                  │
+   │ ✓ .env.local configured                    │
+   │ ✓ npm run dev (running)                    │
+   └────────────────────────────────────────────┘
+
+🎯 WHAT YOU'LL SEE:
+
+   ┌─────────────────────────────────────────────┐
+   │ CONNECTION STATUS                           │
+   │ 🟢 Connected / 🔴 Disconnected              │
+   │ • Arduino: Online/Offline                   │
+   │ • AI Model: Loaded                          │
+   │ • Uptime: XXm XXs                           │
+   └─────────────────────────────────────────────┘
+
+   ┌─────────────────────────────────────────────┐
+   │ LIVE ECG WAVEFORM                           │
+   │ ▁▂▃▅▇█▇▅▃▂▁ (360Hz real-time)               │
+   │ • Green line = ECG signal                   │
+   │ • Shows last ~3 seconds                     │
+   └─────────────────────────────────────────────┘
+
+   ┌─────────────────────────────────────────────┐
+   │ AI PREDICTION                               │
+   │ • Class: Normal/Supraventricular/etc        │
+   │ • Confidence: 95.2%                         │
+   │ • Alert: 🚨 if critical                     │
+   │ • Updates every 0.5s                        │
+   └─────────────────────────────────────────────┘
+
+   ┌─────────────────────────────────────────────┐
+   │ STATISTICS                                  │
+   │ • Total Beats: 1,234                        │
+   │ • Predictions/sec: 2.0                      │
+   │ • Alerts: 5                                 │
+   │ • Charts: Bar + Pie distribution            │
+   └─────────────────────────────────────────────┘
+
+🎨 COLOR CODES:
+   🟢 Green   = Normal beat
+   🟠 Orange  = Supraventricular (medium risk)
+   🔴 Red     = Ventricular (high risk)
+   🟣 Purple  = Fusion beat
+   🔵 Blue    = Unknown/Paced
+
+⚠️ ALERTS:
+   • Red border around prediction card
+   • Pulsing warning icon
+   • Console log: "⚠️ ALERT: Critical arrhythmia"
+
+🔧 CUSTOMIZATION:
+   File: src/lib/ecg-config.ts
+   • Change Pi IP
+   • Adjust chart performance
+   • Modify colors
+
+🐛 TROUBLESHOOTING:
+   
+   Problem: "Disconnected" status
+   Solution:
+   1. Check Pi server running: python3 pi_server.py
+   2. Verify Pi IP: hostname -I
+   3. Test: curl http://192.168.1.101:5000
+   4. Same WiFi network
+
+   Problem: No waveform
+   Solution:
+   1. Check Arduino: ls /dev/ttyUSB*
+   2. Verify data: cat /dev/ttyUSB0
+   3. Check Pi server logs
+
+📚 DOCUMENTATION:
+   • Full Guide: ECG_DASHBOARD_GUIDE.md
+   • Summary: IMPLEMENTATION_SUMMARY.md
+
+🚀 PRODUCTION:
+   npm run build
+   npm run start
+
+┌─────────────────────────────────────────────────────────────┐
+│                     YOU'RE ALL SET! 🎉                       │
+│                                                              │
+│  Your ECG monitoring dashboard is ready to connect to the   │
+│  Raspberry Pi server and display real-time arrhythmia       │
+│  detection powered by AI.                                   │
+│                                                              │
+│  Navigate to: http://localhost:3000/ecg-monitor             │
+└─────────────────────────────────────────────────────────────┘

@@ -1,0 +1,7 @@
+venv/
+__pycache__/
+*.pyc
+.streamlit/
+latest_metrics.json
+outputs/*.csv
+outputs/screenshots/*
