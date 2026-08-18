@@ -11,13 +11,27 @@ Method provenance (see AGENTS.md):
   RGB. Numerical equivalence and clinical validity are NOT assumed.
 - ``DESCRIPTIVE``: mathematical summaries of measured motion, not scores.
 
-This module intentionally holds no thresholds of medical significance.
+MediaPipe world landmarks are 3D coordinates in meters with the midpoint of
+the hips as the origin (a MediaPipe convention, not a camera-centered frame).
+Kinect and MediaPipe axes/coordinate frames are not assumed to be numerically
+equivalent.
+
+This module intentionally holds no thresholds of medical significance. The
+single visibility gate is ``config.MIN_LANDMARK_VISIBILITY`` (an engineering
+quality threshold, not a clinical one).
+
+Feature-specific gating: each primary outcome and each control factor is
+computed from its OWN required landmark set. A missing wrist, for example,
+never erases a valid knee primary outcome; it only none-ifies the wrist-based
+control factors.
 """
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field, asdict
 from typing import Any, Mapping, Optional, Sequence
+
+import config
 
 # ── Schema / exercise constants ────────────────────────────────────────────────
 
@@ -41,8 +55,33 @@ WORLD_LANDMARK_NAMES = {
 }
 REQUIRED_WORLD_LANDMARKS = tuple(WORLD_LANDMARK_NAMES)
 
-# Engineering quality gate for research evidence (not a clinical threshold).
-RESEARCH_MIN_LANDMARK_VISIBILITY = 0.55
+# Engineering visibility gate for research evidence (not a clinical
+# threshold). Defined once in config so no second independent threshold is
+# maintained here.
+MIN_LANDMARK_VISIBILITY = config.MIN_LANDMARK_VISIBILITY
+
+# Per-feature landmark requirements (feature-specific quality gating).
+PO_REQUIRED_LANDMARKS = {
+    "left": ("left_hip", "left_knee", "left_ankle"),
+    "right": ("right_hip", "right_knee", "right_ankle"),
+}
+CONTROL_FACTOR_REQUIREMENTS = {
+    "wrist_distance_m": ("left_wrist", "right_wrist"),
+    "shoulder_distance_m": ("left_shoulder", "right_shoulder"),
+    "hip_distance_m": ("left_hip", "right_hip"),
+    "knee_euclidean_3d_m": ("left_knee", "right_knee"),
+    "knee_delta_y_m": ("left_knee", "right_knee"),
+    "ankle_distance_m": ("left_ankle", "right_ankle"),
+    "left_wrist_shoulder_distance_m": ("left_wrist", "left_shoulder"),
+    "right_wrist_shoulder_distance_m": ("right_wrist", "right_shoulder"),
+    "torso_area_m2": (
+        "left_shoulder", "right_shoulder", "left_hip", "right_hip",
+    ),
+    "left_shoulder_x_m": ("left_shoulder",),
+    "left_shoulder_z_m": ("left_shoulder",),
+    "right_shoulder_x_m": ("right_shoulder",),
+    "right_shoulder_z_m": ("right_shoulder",),
+}
 
 _kimore_provenance = {
     "classification": "ENGINEERING_ADAPTED",
@@ -60,10 +99,36 @@ _kimore_provenance = {
         "MediaPipe wrist is used as an ENGINEERING_ADAPTED proxy for the "
         "KIMORE Hand joint; it is not an exact kinematic Hand equivalent."
     ),
+    "knee_cf_discrepancy_note": (
+        "The KIMORE paper labels d_k as knee distance, while the reviewed "
+        "feature-extraction source computes a signed Y-coordinate difference "
+        "(deltayknee = Knee_R(:,2) - Knee_L(:,2)). BioGait preserves this "
+        "discrepancy in provenance rather than silently equating the two."
+    ),
 }
 
 
 # ── Landmark extraction ───────────────────────────────────────────────────────
+
+def _finite(value: Any) -> bool:
+    """True for a real finite number (rejects NaN / +-inf; also rejects None)."""
+    return isinstance(value, (int, float)) and math.isfinite(float(value))
+
+
+def _build_landmark(lm) -> Optional[dict[str, float]]:
+    """Convert a raw MediaPipe landark to a plain dict, or None if non-finite."""
+    if lm is None:
+        return None
+    entry = {
+        "x": float(getattr(lm, "x", 0.0)),
+        "y": float(getattr(lm, "y", 0.0)),
+        "z": float(getattr(lm, "z", 0.0)),
+        "visibility": float(getattr(lm, "visibility", 1.0)),
+    }
+    if not all(_finite(v) for v in entry.values()):
+        return None
+    return entry
+
 
 def extract_normalized_landmarks(pose_result) -> dict[str, dict[str, float]]:
     """Extract normalized (image-space) landmarks from a PoseLandmarker result.
@@ -79,13 +144,9 @@ def extract_normalized_landmarks(pose_result) -> dict[str, dict[str, float]]:
     out: dict[str, dict[str, float]] = {}
     for name, idx in WORLD_LANDMARK_NAMES.items():
         if idx < len(lms):
-            lm = lms[idx]
-            out[name] = {
-                "x": float(lm.x),
-                "y": float(lm.y),
-                "z": float(lm.z),
-                "visibility": float(getattr(lm, "visibility", 1.0)),
-            }
+            entry = _build_landmark(lms[idx])
+            if entry is not None:
+                out[name] = entry
     return out
 
 
@@ -93,7 +154,8 @@ def extract_world_landmarks(pose_result) -> dict[str, dict[str, float]]:
     """Extract the model-specific world landmarks from a PoseLandmarker result.
 
     Returns ``{name: {"x","y","z","visibility"}}`` or ``{}`` when the result
-    carries no world landmarks (e.g., no pose detected).
+    carries no world landmarks (e.g., no pose detected). Entries with
+    non-finite coordinates/visibility are dropped (never propagated).
     """
     world = getattr(pose_result, "pose_world_landmarks", None)
     if not world:
@@ -102,51 +164,59 @@ def extract_world_landmarks(pose_result) -> dict[str, dict[str, float]]:
     out: dict[str, dict[str, float]] = {}
     for name, idx in WORLD_LANDMARK_NAMES.items():
         if idx < len(lms):
-            lm = lms[idx]
-            out[name] = {
-                "x": float(lm.x),
-                "y": float(lm.y),
-                "z": float(lm.z),
-                "visibility": float(getattr(lm, "visibility", 1.0)),
-            }
+            entry = _build_landmark(lms[idx])
+            if entry is not None:
+                out[name] = entry
     return out
+
+
+def landmark_is_available(
+    name: str,
+    landmarks: Mapping[str, Mapping[str, float]],
+    threshold: float = MIN_LANDMARK_VISIBILITY,
+) -> bool:
+    """A landmark is available when present, finite, and above the threshold."""
+    lm = landmarks.get(name)
+    if lm is None:
+        return False
+    if not all(_finite(lm.get(k)) for k in ("x", "y", "z", "visibility")):
+        return False
+    return float(lm.get("visibility", 0.0)) >= threshold
 
 
 def available_world_landmarks(
     landmarks: Mapping[str, Mapping[str, float]],
-    threshold: float = RESEARCH_MIN_LANDMARK_VISIBILITY,
+    threshold: float = MIN_LANDMARK_VISIBILITY,
 ) -> list[str]:
-    """Names in ``REQUIRED_WORLD_LANDMARKS`` that are present above threshold."""
+    """Required names that are present, finite, and above the threshold."""
     return [
         name
         for name in REQUIRED_WORLD_LANDMARKS
-        if name in landmarks
-        and landmarks[name].get("visibility", 0.0) >= threshold
+        if landmark_is_available(name, landmarks, threshold)
     ]
 
 
 def missing_world_landmarks(
     landmarks: Mapping[str, Mapping[str, float]],
-    threshold: float = RESEARCH_MIN_LANDMARK_VISIBILITY,
+    threshold: float = MIN_LANDMARK_VISIBILITY,
 ) -> list[str]:
-    """Names in ``REQUIRED_WORLD_LANDMARKS`` that are missing or low-visibility."""
+    """Required names that are missing, non-finite, or below the threshold."""
     return [
         name
         for name in REQUIRED_WORLD_LANDMARKS
-        if name not in landmarks
-        or landmarks[name].get("visibility", 0.0) < threshold
+        if not landmark_is_available(name, landmarks, threshold)
     ]
 
 
 def mean_visibility(
     landmarks: Mapping[str, Mapping[str, float]],
 ) -> float:
-    """Average visibility across the required world landmarks that are present."""
-    values = [
-        landmarks[name].get("visibility", 0.0)
-        for name in REQUIRED_WORLD_LANDMARKS
-        if name in landmarks
-    ]
+    """Average visibility across required landmarks that are present and finite."""
+    values = []
+    for name in REQUIRED_WORLD_LANDMARKS:
+        lm = landmarks.get(name)
+        if lm is not None and _finite(lm.get("visibility")):
+            values.append(float(lm["visibility"]))
     if not values:
         return 0.0
     return sum(values) / len(values)
@@ -170,7 +240,7 @@ def kimore_reference_sagittal_knee_angle_yz(
     knee: Mapping[str, float] | None,
     ankle: Mapping[str, float] | None,
 ) -> Optional[float]:
-    """Exact KIMORE Ex5 sagittal knee angle using the reviewed MATLAB convention.
+    """Source-aligned KIMORE Ex5 sagittal knee angle (reviewed convention).
 
     For one side::
 
@@ -181,7 +251,9 @@ def kimore_reference_sagittal_knee_angle_yz(
 
     This is NOT a clamped 0..180 vector angle: the reference representation
     can contain values outside that range, which is why the reference temporal
-    pipeline includes explicit sign/singularity handling.
+    pipeline includes explicit sign/singularity handling. The equation is
+    directly source-derived; numerical identity with the original MATLAB
+    runtime has not been established.
 
     Returns ``None`` when any required point is missing or the hip-knee or
     knee-ankle segment is degenerate (zero length). It never fabricates a
@@ -239,50 +311,93 @@ def torso_area_m2(
     ) + _triangle_area_heron(right_shoulder, right_hip, left_hip)
 
 
+def _knee_delta_y_m(
+    left_knee: Mapping[str, float],
+    right_knee: Mapping[str, float],
+) -> float:
+    """Signed Y-coordinate knee difference: ``right_knee.y - left_knee.y``.
+
+    REFERENCE_DERIVED equation: the reviewed KIMORE feature-extraction source
+    computes ``deltayknee = Knee_R(:,2) - Knee_L(:,2)``. The KIMORE paper
+    labels d_k as "knee distance"; BioGait preserves that discrepancy in
+    provenance rather than silently equating it with a Euclidean distance.
+    """
+    return right_knee["y"] - left_knee["y"]
+
+
+def compute_control_factors(
+    landmarks: Mapping[str, Mapping[str, float]],
+    available: Optional[set[str]] = None,
+) -> dict[str, Optional[float]]:
+    """Compute ALL control factors with feature-specific gating.
+
+    A control factor is computed only when every landmark it requires is
+    available (present, finite, above the visibility threshold). Otherwise it
+    is ``None`` (never 0, never fabricated). The result always contains every
+    key in ``CONTROL_FACTOR_REQUIREMENTS`` so session streams stay aligned.
+    """
+    if available is None:
+        available = set(available_world_landmarks(landmarks))
+    available = set(available)
+    out: dict[str, Optional[float]] = {}
+
+    def _have(*names: str) -> Optional[list]:
+        if all(n in available for n in names):
+            return [landmarks[n] for n in names]
+        return None
+
+    pts = _have("left_wrist", "right_wrist")
+    out["wrist_distance_m"] = euclidean_distance_3d(*pts) if pts else None
+    pts = _have("left_shoulder", "right_shoulder")
+    out["shoulder_distance_m"] = euclidean_distance_3d(*pts) if pts else None
+    pts = _have("left_hip", "right_hip")
+    out["hip_distance_m"] = euclidean_distance_3d(*pts) if pts else None
+    pts = _have("left_knee", "right_knee")
+    out["knee_euclidean_3d_m"] = euclidean_distance_3d(*pts) if pts else None
+    out["knee_delta_y_m"] = _knee_delta_y_m(*pts) if pts else None
+    pts = _have("left_ankle", "right_ankle")
+    out["ankle_distance_m"] = euclidean_distance_3d(*pts) if pts else None
+    pts = _have("left_wrist", "left_shoulder")
+    out["left_wrist_shoulder_distance_m"] = (
+        euclidean_distance_3d(*pts) if pts else None
+    )
+    pts = _have("right_wrist", "right_shoulder")
+    out["right_wrist_shoulder_distance_m"] = (
+        euclidean_distance_3d(*pts) if pts else None
+    )
+    pts = _have("left_shoulder", "right_shoulder", "left_hip", "right_hip")
+    out["torso_area_m2"] = torso_area_m2(*pts) if pts else None
+    out["left_shoulder_x_m"] = (
+        landmarks["left_shoulder"]["x"] if "left_shoulder" in available else None
+    )
+    out["left_shoulder_z_m"] = (
+        landmarks["left_shoulder"]["z"] if "left_shoulder" in available else None
+    )
+    out["right_shoulder_x_m"] = (
+        landmarks["right_shoulder"]["x"] if "right_shoulder" in available else None
+    )
+    out["right_shoulder_z_m"] = (
+        landmarks["right_shoulder"]["z"] if "right_shoulder" in available else None
+    )
+    return out
+
+
 def pairwise_control_factors(
     landmarks: Mapping[str, Mapping[str, float]],
-) -> dict[str, float]:
-    """Euclidean 3D control-factor distances (meters) from world landmarks.
-
-    Distances:
-
-    - wrist_to_wrist
-    - shoulder_to_shoulder
-    - hip_to_hip
-    - knee_to_knee
-    - ankle_to_ankle
-    - left_wrist_to_shoulder (wrist proxy for KIMORE hand)
-    - right_wrist_to_shoulder
-    """
-    return {
-        "wrist_distance_m": euclidean_distance_3d(
-            landmarks["left_wrist"], landmarks["right_wrist"]
-        ),
-        "shoulder_distance_m": euclidean_distance_3d(
-            landmarks["left_shoulder"], landmarks["right_shoulder"]
-        ),
-        "hip_distance_m": euclidean_distance_3d(
-            landmarks["left_hip"], landmarks["right_hip"]
-        ),
-        "knee_distance_m": euclidean_distance_3d(
-            landmarks["left_knee"], landmarks["right_knee"]
-        ),
-        "ankle_distance_m": euclidean_distance_3d(
-            landmarks["left_ankle"], landmarks["right_ankle"]
-        ),
-        "left_wrist_shoulder_distance_m": euclidean_distance_3d(
-            landmarks["left_wrist"], landmarks["left_shoulder"]
-        ),
-        "right_wrist_shoulder_distance_m": euclidean_distance_3d(
-            landmarks["right_wrist"], landmarks["right_shoulder"]
-        ),
-    }
+) -> dict[str, Optional[float]]:
+    """Alias for :func:`compute_control_factors` (kept for import compatibility)."""
+    return compute_control_factors(landmarks)
 
 
 def shoulder_coordinates(
     landmarks: Mapping[str, Mapping[str, float]],
 ) -> dict[str, float]:
-    """Preserve left/right shoulder X and Z world coordinates."""
+    """Raw per-frame shoulder X/Z world coordinates (meters).
+
+    Raw coordinates are captured per frame. Full source-style zero-mean
+    shoulder transverse-plane CF preprocessing is NOT applied per frame; it
+    remains deferred (offline centering helper: :func:`center_sequence`).
+    """
     return {
         "left_shoulder_x_m": landmarks["left_shoulder"]["x"],
         "left_shoulder_z_m": landmarks["left_shoulder"]["z"],
@@ -294,11 +409,12 @@ def shoulder_coordinates(
 def center_sequence(
     values: Sequence[Optional[float]],
 ) -> list[Optional[float]]:
-    """Sequence-centering helper: ``centered[t] = value[t] - mean(sequence)``.
+    """Offline sequence-centering helper: ``centered[t] = value[t] - mean``.
 
     Only valid (non-None) values contribute to the mean. ``None`` entries stay
     ``None``. This is per-sequence centering — it must not be used to fake
-    whole-session centering during live streaming.
+    whole-session centering during live streaming. It is an offline helper;
+    it does not claim the full KIMORE CF temporal preprocessing is reproduced.
     """
     valid = [v for v in values if v is not None]
     if not valid:
@@ -313,8 +429,9 @@ def center_sequence(
 class FrameEvidence:
     """Structured BioGait research evidence for one processed frame.
 
-    All research values are ``None`` when evidence is unavailable — never 0.
-    No fake measurements are ever generated.
+    Feature-specific: a value is ``None`` when the landmarks it depends on are
+    unavailable (missing, non-finite, or below the visibility gate) — never 0.
+    Missing values are never fabricated. No NaN/Infinity is ever emitted.
     """
 
     schema_version: str = SCHEMA_VERSION
@@ -336,109 +453,86 @@ def build_frame_evidence(
     landmarks: Mapping[str, Mapping[str, float]],
     frame_index: int,
     timestamp_seconds: float,
-    visibility_threshold: float = RESEARCH_MIN_LANDMARK_VISIBILITY,
+    visibility_threshold: float = MIN_LANDMARK_VISIBILITY,
 ) -> FrameEvidence:
-    """Build a FrameEvidence object from world landmarks.
+    """Build a FrameEvidence object from world landmarks (feature-gated).
 
-    If any required world landmark is missing or below the visibility gate,
-    the evidence is marked unavailable and every research value is ``None``,
-    with an explicit reason (``missing_world_landmarks`` or
-    ``low_landmark_visibility``). If all required landmarks are present but
-    a knee segment is degenerate (zero-length), the primary knee outcomes
-    are unavailable (``None``) and the reason is
-    ``degenerate_knee_geometry``; control factors remain valid measurements.
+    Each primary outcome and each control factor is computed from its own
+    required landmark set. ``quality["available"]`` means BOTH primary knee
+    outcomes are available (NOT that every possible control factor is).
+    Additional flags expose per-side availability, completeness, and the
+    missing/low-quality landmark list.
     """
-    missing = missing_world_landmarks(landmarks, visibility_threshold)
-    if missing:
-        reason = (
-            "missing_world_landmarks"
-            if any(name not in landmarks for name in missing)
-            else "low_landmark_visibility"
-        )
-        return FrameEvidence(
-            frame_index=frame_index,
-            timestamp_seconds=timestamp_seconds,
-            quality={
-                "available": False,
-                "missing_landmarks": missing,
-                "mean_visibility": mean_visibility(landmarks),
-                "reason": reason,
-            },
-            primary_outcomes={
-                "left_knee_sagittal_deg": None,
-                "right_knee_sagittal_deg": None,
-            },
-            control_factors={
-                "wrist_distance_m": None,
-                "shoulder_distance_m": None,
-                "hip_distance_m": None,
-                "knee_distance_m": None,
-                "ankle_distance_m": None,
-                "left_wrist_shoulder_distance_m": None,
-                "right_wrist_shoulder_distance_m": None,
-                "torso_area_m2": None,
-                "left_shoulder_x_m": None,
-                "left_shoulder_z_m": None,
-                "right_shoulder_x_m": None,
-                "right_shoulder_z_m": None,
-            },
-        )
+    available = set(available_world_landmarks(landmarks, visibility_threshold))
 
-    left_angle = kimore_reference_sagittal_knee_angle_yz(
-        landmarks["left_hip"],
-        landmarks["left_knee"],
-        landmarks["left_ankle"],
-    )
-    right_angle = kimore_reference_sagittal_knee_angle_yz(
-        landmarks["right_hip"],
-        landmarks["right_knee"],
-        landmarks["right_ankle"],
-    )
+    def _po(side: str) -> Optional[float]:
+        names = PO_REQUIRED_LANDMARKS[side]
+        if not all(n in available for n in names):
+            return None
+        hip, knee, ankle = (landmarks[n] for n in names)
+        return kimore_reference_sagittal_knee_angle_yz(hip, knee, ankle)
 
-    common_control_factors = {
-        **pairwise_control_factors(landmarks),
-        "torso_area_m2": torso_area_m2(
-            landmarks["left_shoulder"],
-            landmarks["right_shoulder"],
-            landmarks["left_hip"],
-            landmarks["right_hip"],
-        ),
-        **shoulder_coordinates(landmarks),
+    left_po = _po("left")
+    right_po = _po("right")
+    left_po_available = left_po is not None
+    right_po_available = right_po is not None
+
+    control_factors = compute_control_factors(landmarks, available)
+    control_factors_complete = all(v is not None for v in control_factors.values())
+
+    missing = [
+        name
+        for name in REQUIRED_WORLD_LANDMARKS
+        if not landmark_is_available(name, landmarks, visibility_threshold)
+    ]
+
+    def _reason_for_names(names) -> Optional[str]:
+        for name in names:
+            lm = landmarks.get(name)
+            if lm is None:
+                return "missing_world_landmarks"
+            if not all(_finite(lm.get(k)) for k in ("x", "y", "z", "visibility")):
+                return "non_finite_landmark"
+            if float(lm.get("visibility", 0.0)) < visibility_threshold:
+                return "low_landmark_visibility"
+        return None
+
+    if left_po_available and right_po_available:
+        reason = "ok" if control_factors_complete else "partial"
+    else:
+        po_missing_names = sorted(
+            {
+                n
+                for side in ("left", "right")
+                for n in PO_REQUIRED_LANDMARKS[side]
+                if not landmark_is_available(n, landmarks, visibility_threshold)
+            }
+        )
+        if po_missing_names:
+            reason = _reason_for_names(po_missing_names) or "missing_world_landmarks"
+        else:
+            reason = "degenerate_knee_geometry"
+
+    quality = {
+        "available": left_po_available and right_po_available,
+        "left_po_available": left_po_available,
+        "right_po_available": right_po_available,
+        "primary_outcomes_complete": left_po_available and right_po_available,
+        "control_factors_complete": control_factors_complete,
+        "missing_or_low_quality_landmarks": missing,
+        "mean_visibility": mean_visibility(landmarks),
+        "reason": reason,
     }
-
-    if left_angle is None or right_angle is None:
-        # Degenerate reference geometry: primary outcomes are None (never a
-        # fake 0-degree), made explicit in the quality reason.
-        return FrameEvidence(
-            frame_index=frame_index,
-            timestamp_seconds=timestamp_seconds,
-            quality={
-                "available": False,
-                "missing_landmarks": [],
-                "mean_visibility": mean_visibility(landmarks),
-                "reason": "degenerate_knee_geometry",
-            },
-            primary_outcomes={
-                "left_knee_sagittal_deg": left_angle,
-                "right_knee_sagittal_deg": right_angle,
-            },
-            control_factors=common_control_factors,
-        )
 
     return FrameEvidence(
         frame_index=frame_index,
         timestamp_seconds=timestamp_seconds,
-        quality={
-            "available": True,
-            "missing_landmarks": [],
-            "mean_visibility": mean_visibility(landmarks),
-            "reason": "ok",
-        },
+        quality=quality,
         primary_outcomes={
-            "left_knee_sagittal_deg": left_angle,
-            "right_knee_sagittal_deg": right_angle,
+            "left_knee_sagittal_deg": left_po,
+            "right_knee_sagittal_deg": right_po,
         },
-        control_factors=common_control_factors,
+        control_factors=control_factors,
     )
 
 
