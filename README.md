@@ -8,7 +8,6 @@
 [![Next.js](https://img.shields.io/badge/Next.js-16-black?logo=next.js)](https://nextjs.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-latest-009688?logo=fastapi)](https://fastapi.tiangolo.com/)
 [![MediaPipe](https://img.shields.io/badge/MediaPipe-Pose-FF6F00)](https://google.github.io/mediapipe/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![KUET](https://img.shields.io/badge/Research-KUET_BME-red)](https://kuet.ac.bd/)
 
 </div>
@@ -17,6 +16,8 @@
 
 > **Research prototype** — screening and decision-support architecture.
 > **Not a clinical diagnostic device.** Clinical and evidence-based methodology upgrades are under active development.
+>
+> BioGait risk scoring is a legacy rule-based experimental screening baseline and is **not clinically validated**.
 
 ---
 
@@ -27,7 +28,7 @@ SmartCPET-RehabGuard is a dual-module research system developed at Khulna Univer
 | Module | Purpose | Key Technologies |
 |--------|---------|-----------------|
 | **CPET** (`cpet/`) | Cardiopulmonary exercise testing — real-time ECG, SpO₂, HRV, ventilatory efficiency | Arduino, Raspberry Pi, FastAPI, Socket.IO, Next.js, TensorFlow/Keras |
-| **BioGait** (`biogait/`) | RGB camera-based movement analysis — pose landmarks, gait symmetry, risk screening | OpenCV, MediaPipe Pose, Streamlit, PyQt5 |
+| **BioGait** (`biogait/`) | RGB camera-based movement analysis — pose landmarks, gait symmetry, screening | OpenCV, MediaPipe Pose, PyQt5 |
 
 ---
 
@@ -39,10 +40,18 @@ SmartCPET-RehabGuard/
 │   ├── backend/             # FastAPI + Socket.IO server, ECG model
 │   └── web_dashboard/       # Next.js real-time monitoring dashboard
 ├── biogait/                 # Camera-based movement analysis prototype
+│   ├── app_qt.py            # Primary Qt desktop runtime
+│   ├── ui_worker.py         # QThread camera + MediaPipe worker
+│   ├── app.py               # Legacy OpenCV window + file logging
+│   ├── dashboard.py         # Legacy Streamlit (reads app.py output)
+│   └── metrics.py           # Biomechanical calculations
 ├── docs/                    # Current-state documentation
-├── evidence/                # Research evidence (placeholder)
+│   └── model-provenance.md  # Model training data + licensing
+├── evidence/                # Research evidence (template)
 ├── experiments/             # Experimental code (placeholder)
-├── tests/                   # Test suite (placeholder)
+├── tests/                   # Test suite
+├── AGENTS.md                # Agent/evidence policy
+├── THIRD_PARTY_NOTICES.md   # Third-party dependency notes
 ├── .env.example             # Environment variable template
 └── README.md
 ```
@@ -61,13 +70,13 @@ CO₂, Airflow              Arrhythmia model                   patient records
 ```
 
 ### Key Features
-- Real-time 5-class arrhythmia detection (MIT-BIH trained CNN)
+- Real-time 5-class arrhythmia detection (CNN trained on MIT-BIH)
 - 5 clinical CPET parameters: LRC Ratio, SpO₂/HR, LF/HF, PTT, VE/VCO₂
 - 2-minute screening test workflow
 - Multi-sensor fusion: ECG, PPG/SpO₂, MPU6050 IMU, MQ-135 CO₂
 - Mobile-responsive dark/light theme dashboard
 - Optional Appwrite patient database integration
-- AI-assisted report generation (OpenRouter)
+- AI-assisted research/decision-support summaries (OpenRouter)
 
 ### Quick Start
 ```bash
@@ -88,28 +97,34 @@ npm run dev
 
 A camera-based prototype for real-time gait screening using MediaPipe pose estimation.
 
-### Key Features
-- Real-time pose landmark detection (MediaPipe PoseLandmarker)
-- Knee angle, trunk lean, left-right asymmetry calculation
-- Risk scoring (0–100) with LOW/MODERATE/HIGH classification
-- IP camera and laptop webcam support
-- Streamlit dashboard + PyQt5 desktop application
-- Session metrics logging (CSV)
+### Active Runtime
 
-### Quick Start
+The primary conference runtime is the PyQt5 desktop application:
+
 ```bash
 cd biogait
 pip install -r requirements.txt
-
-# Webcam (default)
-python app.py
-
-# Or desktop app
-python app_qt.py
-
-# Dashboard (separate terminal)
-streamlit run dashboard.py
+python app_qt.py    # primary: Qt desktop with live waveform + metrics
 ```
+
+### Legacy Pipeline
+
+`app.py` is a legacy OpenCV-based runtime that writes metrics to `latest_metrics.json` and CSV files.
+
+`dashboard.py` is a legacy Streamlit companion that reads the JSON file produced by `app.py`. It is **not** currently fed by `app_qt.py`.
+
+### Key Features
+- Real-time pose landmark detection (MediaPipe PoseLandmarker)
+- Knee angle, trunk lean, left-right asymmetry calculation
+- Risk scoring (0–100) — **legacy rule-based heuristic, not clinically validated**
+- IP camera and laptop webcam support
+- Session metrics logging
+
+### Key Evidence
+
+- BioGait heuristic: legacy rule-based experimental screening baseline.
+- See `docs/model-provenance.md` for model and dataset provenance.
+- See `AGENTS.md` for evidence policy on future metrics.
 
 ---
 
@@ -143,14 +158,19 @@ streamlit run dashboard.py
 - `docs/current-state/PROGRESS_REPORT.md` — full project status
 - `docs/current-state/CURRENT_STATE_FRONTEND.md` — frontend architecture
 - `docs/current-state/FRONTEND_TEAM_BACKEND_REPORT.md` — integration notes
+- `docs/model-provenance.md` — model training data and licensing notes
 - `cpet/CPET_PARAMETERS_GUIDE.md` — clinical parameter reference
 - `cpet/QUICK_START.md` — 5-minute setup guide
+- `AGENTS.md` — coding agent / evidence policy
+- `THIRD_PARTY_NOTICES.md` — third-party dependency notes
 
 ---
 
 ## License
 
-This project is licensed under the MIT License — see [LICENSE](LICENSE) for details.
+> Project licensing and third-party notices are being prepared for the research release.
+> See `THIRD_PARTY_NOTICES.md` for current third-party dependency notes.
+> External dependencies are governed by their own respective licenses.
 
 ---
 
