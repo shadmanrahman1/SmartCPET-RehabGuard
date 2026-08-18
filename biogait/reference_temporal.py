@@ -1,38 +1,50 @@
-"""KIMORE reference temporal analysis for Exercise 5 (squat) — OFFLINE ONLY.
+"""KIMORE temporal analysis for Exercise 5 (squat) — OFFLINE ONLY.
+
+The project is PYTHON-ONLY. The reviewed original KIMORE source was written
+in MATLAB; BioGait does not depend on or execute MATLAB. Source equations and
+preprocessing conventions are re-implemented in Python for methodological
+traceability ("source-aligned KIMORE reference implementation").
 
 Two deliberately separate paths:
 
-- :func:`kimore_reference_ex5_temporal_analysis` — EXACT reference path.
-  Classification: REFERENCE_DERIVED / OFFLINE / NOT REALTIME. Reproduces the
-  reviewed KIMORE wrapper source conventions
+- :func:`kimore_reference_ex5_temporal_analysis` — SOURCE-ALIGNED KIMORE
+  REFERENCE PATH. Classification: REFERENCE_DERIVED / OFFLINE / NOT REALTIME.
+  Reproduces the reviewed conventions
   (``matlab/matlab_original/feat_extract_Ex5.m`` and ``filtering.m``):
 
   1. KIMORE source retains samples ``10:end`` in MATLAB (1-based) indexing,
      equivalent to discarding the first 9 samples in zero-based Python —
      i.e. ``values[9:]``;
   2. reference sign-flip handling (negate a sample when the consecutive
-     difference exceeds 100 degrees — NOT a +/-360 unwrap);
-  3. KIMORE reference zero-phase filter (order 3, 1 Hz, 30 Hz; ba-form
-     Butterworth + ``filtfilt``);
+     difference is outside [-100, +100] degrees — NOT a +/-360 unwrap);
+  3. KIMORE reference zero-phase filter (fixed order 3, 1 Hz, 30 Hz;
+     ba-form Butterworth + ``filtfilt``);
   4. maxima detection at ``max(signal)/sqrt(2)``;
   5. minima detection on ``max(signal) - signal`` at its ``max/sqrt(2)``
      threshold;
   6. reference minimum peak distance ``floor(n_samples / 10)``.
 
-  The exact path requires a uniform, complete sample stream at the 30 Hz
-  reference convention. Missing samples or a non-30 Hz rate return a
-  structured warning and filtering/peak detection is NOT run (no silent
-  resampling is introduced in this sprint).
+  The algorithmic conventions and parameters follow the reviewed KIMORE
+  source. Numerical identity with the original MATLAB runtime has not been
+  established.
 
-- :func:`kimore_adapted_ex5_temporal_analysis` — actual-frame-rate path.
-  Classification: ENGINEERING_ADAPTED. Uses the supplied frame rate while
-  retaining the 1 Hz / order-3 filter concept. It is NOT the exact KIMORE
-  reference pipeline and its results are not REFERENCE_DERIVED.
+  The exact path requires a complete sample stream (no None/NaN/+-inf) at the
+  30 Hz reference convention, and — when timestamps are supplied — timestamps
+  that are finite, strictly increasing, and uniform at 30 Hz. Any violation
+  returns a structured warning and filtering/peak detection is NOT run.
 
-Detected candidates are NOT clinically valid repetitions. This module does
-NOT produce pass/fail or any clinical decision. The KIMORE acquisition
-protocol involved repeated exercise execution; its full-sequence peak
-settings are not automatically valid for an arbitrary live session length.
+- :func:`kimore_adapted_ex5_temporal_analysis` — ACTUAL-frame-rate path.
+  Classification: ENGINEERING_ADAPTED. Uses the supplied frame rate with the
+  order-3 / 1 Hz filter concept, via the separate adapted zero-phase filter.
+  It is NOT the exact KIMORE reference pipeline and its results are not
+  REFERENCE_DERIVED. Provided timestamps must be finite, strictly increasing,
+  and uniform at the supplied ``fs``.
+
+Detected candidates are NOT clinically valid repetitions; no pass/fail is
+produced. The KIMORE acquisition protocol involved repeated exercise
+execution; its full-sequence peak settings are not automatically valid for an
+arbitrary session length. CF temporal trim/filter preprocessing from the
+reviewed source remains DEFERRED in Sprint A.
 """
 from __future__ import annotations
 
@@ -42,7 +54,10 @@ from typing import Optional, Sequence, Union
 import numpy as np
 from scipy import signal as sp_signal
 
-from temporal_filters import kimore_reference_zero_phase_filter
+from temporal_filters import (
+    kimore_adapted_zero_phase_filter,
+    kimore_reference_zero_phase_filter,
+)
 
 # MATLAB indexing is 1-based: the reviewed source keeps ``angle = angle(10:end)``,
 # i.e. it discards samples 1..9 and retains samples 10..end. The zero-based
@@ -52,6 +67,17 @@ KIMORE_INITIAL_DISCARDED_SAMPLES = 9
 KIMORE_WRAP_DIFF_THRESHOLD_DEG = 100.0
 KIMORE_PEAK_HEIGHT_FACTOR = 1.0 / math.sqrt(2.0)
 KIMORE_REFERENCE_FS_HZ = 30.0
+
+# Tiny numerical tolerance used only to distinguish 30.0 / dt from
+# floating-point representation noise — engineering/numerical, not clinical.
+_FS_TOLERANCE_HZ = 1e-6
+_DT_TOLERANCE_S = 1e-6
+
+ADAPTED_NOTE = (
+    "Uses the actual supplied frame rate; not the exact 30 Hz KIMORE "
+    "reference pipeline. Results are engineering-adapted, not "
+    "REFERENCE_DERIVED."
+)
 
 
 def remove_initial_samples(
@@ -133,6 +159,46 @@ def detect_minima(
     return [int(i) for i in idx], [float(v) for v in filtered[idx]]
 
 
+# ── Timestamp integrity (item: validate temporal timestamps) ──────────────────
+
+def validate_timestamps(
+    timestamps: Optional[Sequence[float]],
+    n_samples: int,
+    *,
+    uniform_at: float,
+) -> tuple[bool, Optional[str]]:
+    """Validate supplied timestamps: length, finite, strictly increasing, uniform.
+
+    Returns ``(ok, issue)``. When ``timestamps is None`` the caller will
+    derive time from ``fs`` instead, so ``(True, None)`` is returned.
+    A non-uniform-at-``uniform_at`` result is reported separately.
+    """
+    if timestamps is None:
+        return True, None
+    if len(timestamps) != n_samples:
+        return False, (
+            f"timestamp count ({len(timestamps)}) does not match "
+            f"angle count ({n_samples})"
+        )
+    values = [float(t) for t in timestamps]
+    prev = None
+    for i, t in enumerate(values):
+        if t is None or not math.isfinite(t):
+            return False, f"timestamp {i} is missing or non-finite"
+        if prev is not None and t <= prev:
+            return False, f"timestamps are not strictly increasing at index {i}"
+        prev = t
+    expected_dt = 1.0 / uniform_at
+    for i in range(1, len(values)):
+        dt = values[i] - values[i - 1]
+        if not math.isclose(dt, expected_dt, rel_tol=0.0, abs_tol=_DT_TOLERANCE_S):
+            return False, (
+                f"timestamps are not uniform at {uniform_at} Hz "
+                f"(interval {dt:.6f} s at index {i})"
+            )
+    return True, None
+
+
 def _base_result(
     *,
     fs: float,
@@ -155,33 +221,53 @@ def _base_result(
 
 
 def _run_ex5_pipeline(
-    angle_stream: Sequence[float],
+    angles: Sequence[float],
     timestamps: Optional[Sequence[float]],
     fs: float,
+    filter_fn,
+    classification: str,
+    adapted_note: Optional[str] = None,
 ) -> dict:
-    """Shared offline Ex5 pipeline mechanics (trim, sign-flip, filter, extrema)."""
-    angles = [float(a) for a in angle_stream]
+    """Shared offline Ex5 pipeline mechanics (trim, sign-flip, filter, extrema).
+
+    ``angles`` are pre-validated: complete finite samples (no None/NaN/+-inf).
+    ``filter_fn`` selects the REFERENCE vs ADAPTED zero-phase filter so the
+    source-aligned reference path can never call a non-30 Hz filter and the
+    adapted path never claims to be the reference filter.
+    """
     if len(angles) <= KIMORE_INITIAL_DISCARDED_SAMPLES:
         result = _base_result(fs=fs)
+        result["classification"] = classification
+        result["offline"] = True
         result["warning"] = "insufficient_samples_after_trimming"
+        if adapted_note:
+            result["adapted_note"] = adapted_note
         return result
 
     trimmed = remove_initial_samples(angles)
     corrected, n_corrections = kimore_reference_sign_flip_correction(trimmed)
 
     try:
-        filtered = kimore_reference_zero_phase_filter(corrected, fs=fs)
+        filtered = filter_fn(corrected)
     except ValueError as exc:
         result = _base_result(fs=fs)
+        result["classification"] = classification
+        result["offline"] = True
         result["trimmed_length"] = len(corrected)
-        result["warning"] = f"insufficient_samples_for_reference_filter: {exc}"
+        result["warning"] = f"insufficient_samples_for_filter: {exc}"
+        if adapted_note:
+            result["adapted_note"] = adapted_note
         return result
 
     if len(filtered) < 3:
         result = _base_result(fs=fs)
+        result["classification"] = classification
+        result["offline"] = True
         result["trimmed_length"] = len(corrected)
         result["filtered_signal"] = [float(v) for v in filtered]
         result["warning"] = "insufficient_filtered_samples"
+        if adapted_note:
+            result["adapted_note"] = adapted_note
         return result
 
     distance = _min_peak_distance(len(filtered))
@@ -190,9 +276,11 @@ def _run_ex5_pipeline(
 
     def _time_of(stream_index: int) -> float:
         original_index = stream_index + KIMORE_INITIAL_DISCARDED_SAMPLES
-        if timestamps is not None and original_index < len(timestamps):
+        if timestamps is not None:
             return float(timestamps[original_index])
-        return stream_index / fs
+        # No explicit timestamps: time_s refers to the ORIGINAL source-session
+        # timeline via the zero-based source index (never restarting at 0).
+        return original_index / fs
 
     events = [
         {
@@ -221,6 +309,8 @@ def _run_ex5_pipeline(
     result = _base_result(fs=fs)
     result.update(
         {
+            "classification": classification,
+            "offline": True,
             "warning": None,
             "n_sign_corrections": n_corrections,
             "trimmed_length": len(corrected),
@@ -234,6 +324,8 @@ def _run_ex5_pipeline(
             "candidate_repetition_durations_s": durations,
         }
     )
+    if adapted_note:
+        result["adapted_note"] = adapted_note
     return result
 
 
@@ -242,18 +334,21 @@ def kimore_reference_ex5_temporal_analysis(
     timestamps: Optional[Sequence[float]] = None,
     fs: float = KIMORE_REFERENCE_FS_HZ,
 ) -> dict:
-    """EXACT KIMORE reference path for one knee stream (OFFLINE, not realtime).
+    """SOURCE-ALIGNED KIMORE reference path for one knee stream (OFFLINE).
 
-    Only runs when the stream is complete (no ``None`` samples) and the
-    sample rate is the 30 Hz reference convention. Otherwise returns a
-    structured warning and does NOT run filtering/peak detection:
+    Classification: REFERENCE_DERIVED / OFFLINE / NOT REALTIME.
 
-    - ``missing_samples_require_resampling`` — a ``None`` sample is present.
-    - ``reference_requires_30hz_or_resampling`` — ``fs`` is not 30 Hz
-      (within a tiny floating-point tolerance used only to distinguish
-      30.0 from representation noise).
+    Requirements (all must hold, else a structured warning is returned and
+    filtering/peak detection is NOT run):
 
-    Classification: REFERENCE_DERIVED.
+    - complete samples: no ``None`` / NaN / +-inf
+    - the reference convention sample rate is 30 Hz (``fs`` within a tiny
+      float tolerance used only to distinguish 30.0 from representation noise)
+    - when timestamps are supplied: finite, strictly increasing, uniform at
+      30 Hz.
+
+    The reference filter is called ONLY with its fixed 30 Hz / order-3 / 1 Hz
+    parameters; this path never passes an arbitrary FPS to it.
     """
     if any(v is None for v in angle_stream):
         result = _base_result(fs=fs)
@@ -262,59 +357,89 @@ def kimore_reference_ex5_temporal_analysis(
         result["warning"] = "missing_samples_require_resampling"
         return result
 
-    if not math.isclose(float(fs), KIMORE_REFERENCE_FS_HZ, rel_tol=0.0, abs_tol=1e-6):
+    if not math.isclose(float(fs), KIMORE_REFERENCE_FS_HZ, rel_tol=0.0, abs_tol=_FS_TOLERANCE_HZ):
         result = _base_result(fs=fs)
         result["classification"] = "REFERENCE_DERIVED"
         result["offline"] = True
         result["warning"] = "reference_requires_30hz_or_resampling"
         return result
 
-    result = _run_ex5_pipeline(angle_stream, timestamps, fs)
-    result["classification"] = "REFERENCE_DERIVED"
-    result["offline"] = True
-    return result
+    ok, issue = validate_timestamps(timestamps, len(angle_stream), uniform_at=KIMORE_REFERENCE_FS_HZ)
+    if timestamps is not None and not ok:
+        warning = (
+            "reference_requires_uniform_30hz_timestamps_or_resampling"
+            if "not uniform" in issue
+            else f"invalid_reference_timestamps: {issue}"
+        )
+        result = _base_result(fs=fs)
+        result["classification"] = "REFERENCE_DERIVED"
+        result["offline"] = True
+        result["warning"] = warning
+        return result
+
+    return _run_ex5_pipeline(
+        [float(a) for a in angle_stream],
+        timestamps,
+        fs,
+        filter_fn=lambda values: kimore_reference_zero_phase_filter(values),
+        classification="REFERENCE_DERIVED",
+    )
 
 
 def kimore_adapted_ex5_temporal_analysis(
     angle_stream: Sequence[Union[float, int, None]],
     timestamps: Optional[Sequence[float]] = None,
-    fs: float = 30.0,
+    fs: float = KIMORE_REFERENCE_FS_HZ,
 ) -> dict:
     """ACTUAL-frame-rate ADAPTED analysis path.
 
     Classification: ENGINEERING_ADAPTED — NOT the exact KIMORE reference
-    pipeline. Uses the supplied frame rate while retaining the 1 Hz,
-    order-3 filter concept. Missing samples return
-    ``missing_samples_require_resampling`` and no filtering is applied.
+    pipeline. Uses the supplied frame rate with the order-3 / 1 Hz concept via
+    the separate adapted zero-phase filter. Complete finite samples are
+    required; supplied timestamps must be finite, strictly increasing, and
+    uniform at ``fs`` (the Butterworth filter assumes fixed-rate samples).
     """
     if any(v is None for v in angle_stream):
         result = _base_result(fs=fs)
         result["classification"] = "ENGINEERING_ADAPTED"
         result["offline"] = True
         result["warning"] = "missing_samples_require_resampling"
+        result["adapted_note"] = ADAPTED_NOTE
         return result
 
-    result = _run_ex5_pipeline(angle_stream, timestamps, fs)
-    result["classification"] = "ENGINEERING_ADAPTED"
-    result["offline"] = True
-    result["adapted_note"] = (
-        "Uses the actual supplied frame rate; not the exact 30 Hz KIMORE "
-        "reference pipeline. Results are engineering-adapted, not "
-        "REFERENCE_DERIVED."
+    ok, issue = validate_timestamps(timestamps, len(angle_stream), uniform_at=float(fs))
+    if timestamps is not None and not ok:
+        result = _base_result(fs=fs)
+        result["classification"] = "ENGINEERING_ADAPTED"
+        result["offline"] = True
+        result["warning"] = (
+            "adapted_requires_uniform_sampling_or_resampling"
+            if "not uniform" in issue
+            else f"invalid_adapted_timestamps: {issue}"
+        )
+        result["adapted_note"] = ADAPTED_NOTE
+        return result
+
+    return _run_ex5_pipeline(
+        [float(a) for a in angle_stream],
+        timestamps,
+        fs,
+        filter_fn=lambda values: kimore_adapted_zero_phase_filter(values, fs),
+        classification="ENGINEERING_ADAPTED",
+        adapted_note=ADAPTED_NOTE,
     )
-    return result
 
 
 def side_event_summary(
     left_analysis: Optional[dict],
     right_analysis: Optional[dict],
 ) -> dict:
-    """Per-side reference event summary; no combined/bilateral repetition count.
+    """Per-side event summary; no combined/bilateral repetition count.
 
-    Repetition-event candidate counts and peak-to-peak durations are reported
-    per knee side. Bilateral pairing is explicitly deferred (no temporal
-    pairing tolerance is invented in this sprint); `bilateral_pairing_status`
-    is always ``"deferred"``.
+    Event candidate counts and peak-to-peak durations are reported per knee
+    side under GENERIC names (no "reference" provenance in the summary itself;
+    provenance is assigned by the caller's own branch). Bilateral pairing is
+    explicitly deferred (`bilateral_pairing_status: "deferred"`).
     """
     def _count(analysis: Optional[dict]) -> int:
         if not analysis:
@@ -330,9 +455,9 @@ def side_event_summary(
         ]
 
     return {
-        "left_reference_maxima_count": _count(left_analysis),
-        "right_reference_maxima_count": _count(right_analysis),
-        "left_candidate_repetition_durations_s": _durations(left_analysis),
-        "right_candidate_repetition_durations_s": _durations(right_analysis),
+        "left_maxima_count": _count(left_analysis),
+        "right_maxima_count": _count(right_analysis),
+        "left_candidate_durations_s": _durations(left_analysis),
+        "right_candidate_durations_s": _durations(right_analysis),
         "bilateral_pairing_status": "deferred",
     }
