@@ -87,7 +87,10 @@
 
 Offline reference path describing the KIMORE Ex5 event-extraction convention:
 
-1. remove the initial 10 samples from the knee-angle stream;
+1. KIMORE source retains samples `10:end` in MATLAB (1-based) indexing —
+   equivalent to discarding the first 9 samples (`values[9:]`) in zero-based
+   Python; trimmed index 0 maps to original Python index 9 / MATLAB sample
+   10;
 2. exact sign-flip correction (negate a sample when the consecutive angle
    difference is below −100° or above +100° — NOT a ±360 unwrap);
 3. ba-form `filtfilt` reference filter (30 Hz, order 3, 1 Hz);

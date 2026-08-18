@@ -12,10 +12,14 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
+import shutil
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
 BIOGAIT = REPO / "biogait"
@@ -167,6 +171,120 @@ class CliLoadTests(unittest.TestCase):
         biogait = str(REPO / "biogait")
         self.assertIn(biogait, sys.path)
         self.assertTrue(Path(benchmark_video._REPO_BIOGAIT).resolve() == REPO / "biogait")
+
+
+class AnalyzeVideoLifecycleTests(unittest.TestCase):
+    """BLOCKER 1: analyzed Python analyze_video() real-execution lifecycle.
+
+    Mocks cv2 (VideoCapture/isOpened/get/read/release) and the model/landmarker
+    construction so the real analyze_video() runs VideoCapture creation ->
+    isOpened() -> _read_video_fps() -> FPS resolution without real cv2,
+    MediaPipe, a model download, or a video file.
+    """
+
+    class _MockCap:
+        def __init__(self, fps=30.0, opened=True, end=True):
+            self._fps = fps
+            self.opened = opened
+            self.end = end
+            self.release_count = 0
+
+        def isOpened(self):
+            return self.opened
+
+        def get(self, prop):
+            if prop == 1:  # CAP_PROP_FPS
+                return self._fps
+            return 0.0
+
+        def read(self):
+            if self.end:
+                return (False, None)
+            return (True, None)
+
+        def release(self):
+            self.release_count += 1
+
+    class _MockLandmarker:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def _patch_runtime(self, cap):
+        fake_cv2 = types.SimpleNamespace(
+            CAP_PROP_FPS=1,
+            VideoCapture=lambda _path: cap,
+            cvtColor=lambda img, code: img,
+            COLOR_BGR2RGB=0,
+        )
+        patchers = [
+            mock.patch.object(analyze_video, "cv2", fake_cv2),
+            mock.patch.object(analyze_video, "_ensure_model", lambda: "dummy.task"),
+            mock.patch.object(
+                analyze_video, "_build_landmarker", lambda model: self._MockLandmarker()
+            ),
+        ]
+        for p in patchers:
+            p.start()
+        self.addCleanup(lambda: [p.stop() for p in patchers])
+
+    def _run(self, cap, **kwargs):
+        tmp = tempfile.mkdtemp(prefix="biogait_offline_")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        out = Path(tmp) / "session.json"
+        result = analyze_video.analyze_video(
+            Path("movie.mp4"), out, **kwargs
+        )
+        return result, out
+
+    def test_valid_capture_no_tuple_unpacking_error(self):
+        # Regression: _read_video_fps returns (fps, trusted); analyze_video
+        # must unpack exactly 2 values, not 3.
+        cap = self._MockCap(fps=30.0)
+        self._patch_runtime(cap)
+        result, out = self._run(cap)
+        self.assertEqual(result["source"]["fps_used_hz"], 30.0)
+        self.assertEqual(result["source"]["video_fps_hz"], 30.0)
+        self.assertIs(result["source"]["fps_trusted_from_video"], True)
+        self.assertEqual(result["source"]["frames_read"], 0)
+        self.assertTrue(out.exists())
+        payload = json.loads(out.read_text(encoding="utf-8"))
+        self.assertEqual(payload["source"]["source_type"], "local_video")
+        self.assertEqual(cap.release_count, 1)
+
+    def test_video_fps_resolved_correctly(self):
+        cap = self._MockCap(fps=29.97)
+        self._patch_runtime(cap)
+        result, _ = self._run(cap)
+        self.assertEqual(result["source"]["fps_used_hz"], 29.97)
+        self.assertEqual(result["source"]["video_fps_hz"], 29.97)
+        self.assertIs(result["source"]["fps_trusted_from_video"], True)
+
+    def test_invalid_fps_uses_override(self):
+        cap = self._MockCap(fps=0.0)  # invalid metadata
+        self._patch_runtime(cap)
+        result, _ = self._run(cap, fps_override=25.0)
+        self.assertEqual(result["source"]["fps_used_hz"], 25.0)
+        self.assertIsNone(result["source"]["video_fps_hz"])
+        self.assertIs(result["source"]["fps_trusted_from_video"], False)
+        self.assertEqual(cap.release_count, 1)
+
+    def test_invalid_fps_without_override_raises_and_releases(self):
+        cap = self._MockCap(fps=0.0)
+        self._patch_runtime(cap)
+        with self.assertRaises(ValueError) as ctx:
+            self._run(cap)
+        self.assertIn("--fps", str(ctx.exception))
+        self.assertEqual(cap.release_count, 1)  # capture released on failure
+
+    def test_capture_released_when_not_opened(self):
+        cap = self._MockCap(opened=False)
+        self._patch_runtime(cap)
+        with self.assertRaises(RuntimeError):
+            self._run(cap)
+        self.assertEqual(cap.release_count, 1)
 
 
 if __name__ == "__main__":

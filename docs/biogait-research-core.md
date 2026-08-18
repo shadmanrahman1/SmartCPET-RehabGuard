@@ -41,7 +41,7 @@ is preserved. One PoseLandmarker result now feeds two consumers:
 |--------|---------|----------------|
 | `biogait/evidence_features.py` | World-landmark extraction, exact KIMORE sagittal knee geometry (`atan2` convention), Euclidean control factors, torso area, shoulder coordinates, frame evidence schema | ENGINEERING_ADAPTED / DESCRIPTIVE / REFERENCE_DERIVED (equation) |
 | `biogait/temporal_filters.py` | KIMORE reference zero-phase filter (ba-form Butterworth + `filtfilt`); causal Butterworth adaptation (SOS) | REFERENCE_DERIVED (offline) / ENGINEERING_ADAPTED (causal) |
-| `biogait/reference_temporal.py` | Offline KIMORE Ex5 reference analysis — EXACT path (requires complete 30 Hz stream; trim 10, sign-flip when consecutive diff >100°, ba-form `filtfilt`, extrema at max/√2, min peak distance ⌊n/10⌋) + ACTUAL-fps ADAPTED path | REFERENCE_DERIVED (exact) / ENGINEERING_ADAPTED (adapted) / OFFLINE |
+| `biogait/reference_temporal.py` | Offline KIMORE Ex5 reference analysis — EXACT path (requires complete 30 Hz stream; MATLAB `10:end` trim = discard first 9 in zero-based Python, sign-flip when consecutive diff >100°, ba-form `filtfilt`, extrema at max/√2, min peak distance ⌊n/10⌋) + ACTUAL-fps ADAPTED path | REFERENCE_DERIVED (exact) / ENGINEERING_ADAPTED (adapted) / OFFLINE |
 | `biogait/session_analysis.py` | Bounded session accumulator, aligned arrays (gaps preserved as None), effective sample rate, descriptive features (ROM, angular velocity), versioned session schema | DESCRIPTIVE |
 | `biogait/analyze_video.py` | Offline video analyzer CLI producing structured session JSON/CSV | ENGINEERING |
 

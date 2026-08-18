@@ -217,22 +217,30 @@ def analyze_video(
 
     Console messages may print the local input path, but the persisted
     research JSON never does (see ``source`` metadata).
+
+    Capture lifecycle: the VideoCapture is owned by this function and is
+    released exactly once in the single outer ``finally``. That covers every
+    failure point (capture open, FPS resolution, timeline construction, model
+    / landmarker setup, frame processing, and export/write processing) without
+    double-release ownership problems.
     """
     mp = __import__("mediapipe")
-    cap, video_fps, fps_from_video = _read_video_fps(cv2.VideoCapture(str(input_path)))
-    if not cap.isOpened():
-        raise RuntimeError(f"could not open video: {input_path}")
-    fps = _resolve_fps(video_fps, fps_from_video, fps_override)
-    timeline = SourceVideoTimeline(fps)
-
-    model = _ensure_model() if model_path is None else str(model_path)
-    landmarker = _build_landmarker(model)
-
-    accumulator = SessionAccumulator(max_frames=max_frames if max_frames > 0 else None)
-    frames: list[dict] = []
-    start_wall = time.perf_counter()
-
+    cap = cv2.VideoCapture(str(input_path))
     try:
+        if not cap.isOpened():
+            raise RuntimeError(f"could not open video: {input_path}")
+
+        video_fps, fps_from_video = _read_video_fps(cap)
+        fps = _resolve_fps(video_fps, fps_from_video, fps_override)
+        timeline = SourceVideoTimeline(fps)
+
+        model = _ensure_model() if model_path is None else str(model_path)
+        landmarker = _build_landmarker(model)
+
+        accumulator = SessionAccumulator(max_frames=max_frames if max_frames > 0 else None)
+        frames: list[dict] = []
+        start_wall = time.perf_counter()
+
         with landmarker:
             frame_index = 0
             while True:
@@ -268,80 +276,80 @@ def analyze_video(
                 frame_index += 1
                 if max_frames > 0 and frame_index >= max_frames:
                     break
+
+        processing_wall_s = time.perf_counter() - start_wall
+        aligned = accumulator.aligned_arrays()
+
+        left_exact = kimore_reference_ex5_temporal_analysis(
+            aligned["left_knee_sagittal_deg"], aligned["timestamps_s"], 30.0
+        )
+        right_exact = kimore_reference_ex5_temporal_analysis(
+            aligned["right_knee_sagittal_deg"], aligned["timestamps_s"], 30.0
+        )
+        # The ADAPTED path uses the deterministic source-video timeline rate.
+        left_adapted = kimore_adapted_ex5_temporal_analysis(
+            aligned["left_knee_sagittal_deg"], aligned["timestamps_s"], fps
+        )
+        right_adapted = kimore_adapted_ex5_temporal_analysis(
+            aligned["right_knee_sagittal_deg"], aligned["timestamps_s"], fps
+        )
+        summary = side_event_summary(left_adapted, right_adapted)
+        descriptors = descriptive_temporal_features(aligned, summary, fps)
+
+        total = accumulator.total_added
+        available = accumulator.available_count
+        availability = (available / total) if total else 0.0
+        quality_summary = {
+            "frames_added": total,
+            "available_frames": available,
+            "unavailable_frames": accumulator.unavailable_count,
+            "availability_rate": round(availability, 4),
+            "evicted_frames": accumulator.evicted_count,
+        }
+
+        # No local/absolute input path is persisted. Source metadata is neutral.
+        source = {
+            "source_type": "local_video",
+            "video_fps_hz": round(video_fps, 4) if fps_from_video else None,
+            "fps_used_hz": round(fps, 4),
+            "frames_read": total,
+            "fps_trusted_from_video": fps_from_video,
+            "processing_wall_seconds": round(processing_wall_s, 4),
+        }
+
+        export = build_session_export(
+            source=source,
+            method_provenance=METHOD_PROVENANCE,
+            quality_summary=quality_summary,
+            frames=frames,
+            session_descriptors=descriptors,
+            kimore_reference_analysis={
+                "exact": {"left": left_exact, "right": right_exact},
+                "adapted": {"left": left_adapted, "right": right_adapted},
+            },
+            limitations=LIMITATIONS,
+            include_frames=True,
+        )
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(
+            json.dumps(export, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        if csv_path:
+            _write_csv(csv_path, frames)
+
+        print(f"[analyze_video] input={input_path}")
+        print(f"[analyze_video] frames_added={total} available={available}")
+        print(
+            f"[analyze_video] adapted reference candidates "
+            f"(left={summary['left_reference_maxima_count']}, "
+            f"right={summary['right_reference_maxima_count']}), "
+            f"bilateral_pairing={summary['bilateral_pairing_status']}"
+        )
+        print(f"[analyze_video] wrote {output_path}")
+        return export
     finally:
         cap.release()
-
-    processing_wall_s = time.perf_counter() - start_wall
-    aligned = accumulator.aligned_arrays()
-
-    left_exact = kimore_reference_ex5_temporal_analysis(
-        aligned["left_knee_sagittal_deg"], aligned["timestamps_s"], 30.0
-    )
-    right_exact = kimore_reference_ex5_temporal_analysis(
-        aligned["right_knee_sagittal_deg"], aligned["timestamps_s"], 30.0
-    )
-    # The ADAPTED path uses the deterministic source-video timeline rate.
-    left_adapted = kimore_adapted_ex5_temporal_analysis(
-        aligned["left_knee_sagittal_deg"], aligned["timestamps_s"], fps
-    )
-    right_adapted = kimore_adapted_ex5_temporal_analysis(
-        aligned["right_knee_sagittal_deg"], aligned["timestamps_s"], fps
-    )
-    summary = side_event_summary(left_adapted, right_adapted)
-    descriptors = descriptive_temporal_features(aligned, summary, fps)
-
-    total = accumulator.total_added
-    available = accumulator.available_count
-    availability = (available / total) if total else 0.0
-    quality_summary = {
-        "frames_added": total,
-        "available_frames": available,
-        "unavailable_frames": accumulator.unavailable_count,
-        "availability_rate": round(availability, 4),
-        "evicted_frames": accumulator.evicted_count,
-    }
-
-    # No local/absolute input path is persisted. Source metadata is neutral.
-    source = {
-        "source_type": "local_video",
-        "video_fps_hz": round(video_fps, 4) if fps_from_video else None,
-        "fps_used_hz": round(fps, 4),
-        "frames_read": total,
-        "fps_trusted_from_video": fps_from_video,
-        "processing_wall_seconds": round(processing_wall_s, 4),
-    }
-
-    export = build_session_export(
-        source=source,
-        method_provenance=METHOD_PROVENANCE,
-        quality_summary=quality_summary,
-        frames=frames,
-        session_descriptors=descriptors,
-        kimore_reference_analysis={
-            "exact": {"left": left_exact, "right": right_exact},
-            "adapted": {"left": left_adapted, "right": right_adapted},
-        },
-        limitations=LIMITATIONS,
-        include_frames=True,
-    )
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(
-        json.dumps(export, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
-    if csv_path:
-        _write_csv(csv_path, frames)
-
-    print(f"[analyze_video] input={input_path}")
-    print(f"[analyze_video] frames_added={total} available={available}")
-    print(
-        f"[analyze_video] adapted reference candidates "
-        f"(left={summary['left_reference_maxima_count']}, "
-        f"right={summary['right_reference_maxima_count']}), "
-        f"bilateral_pairing={summary['bilateral_pairing_status']}"
-    )
-    print(f"[analyze_video] wrote {output_path}")
-    return export
 
 
 def _build_parser() -> argparse.ArgumentParser:

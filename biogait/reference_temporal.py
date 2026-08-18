@@ -7,7 +7,9 @@ Two deliberately separate paths:
   reviewed KIMORE wrapper source conventions
   (``matlab/matlab_original/feat_extract_Ex5.m`` and ``filtering.m``):
 
-  1. remove the initial 10 samples from the knee-angle stream;
+  1. KIMORE source retains samples ``10:end`` in MATLAB (1-based) indexing,
+     equivalent to discarding the first 9 samples in zero-based Python —
+     i.e. ``values[9:]``;
   2. reference sign-flip handling (negate a sample when the consecutive
      difference exceeds 100 degrees — NOT a +/-360 unwrap);
   3. KIMORE reference zero-phase filter (order 3, 1 Hz, 30 Hz; ba-form
@@ -42,16 +44,25 @@ from scipy import signal as sp_signal
 
 from temporal_filters import kimore_reference_zero_phase_filter
 
-KIMORE_INITIAL_TRIM_SAMPLES = 10
+# MATLAB indexing is 1-based: the reviewed source keeps ``angle = angle(10:end)``,
+# i.e. it discards samples 1..9 and retains samples 10..end. The zero-based
+# Python equivalent is ``values[9:]`` (NOT ``values[10:]``).
+KIMORE_FIRST_RETAINED_MATLAB_SAMPLE = 10
+KIMORE_INITIAL_DISCARDED_SAMPLES = 9
 KIMORE_WRAP_DIFF_THRESHOLD_DEG = 100.0
 KIMORE_PEAK_HEIGHT_FACTOR = 1.0 / math.sqrt(2.0)
 KIMORE_REFERENCE_FS_HZ = 30.0
 
 
 def remove_initial_samples(
-    values: Sequence[float], n: int = KIMORE_INITIAL_TRIM_SAMPLES
+    values: Sequence[float], n: int = KIMORE_INITIAL_DISCARDED_SAMPLES
 ) -> list[float]:
-    """Remove the first ``n`` samples (reference acquisition warm-up trim)."""
+    """Discard the first ``n`` samples (default 9, matching MATLAB ``10:end``).
+
+    ``values[n:]`` — the default discards the first 9 zero-based samples, so
+    the first retained element is the original Python index 9 / MATLAB sample
+    10.
+    """
     if n < 0:
         return list(values)
     return list(values[n:]) if n < len(values) else []
@@ -125,11 +136,13 @@ def detect_minima(
 def _base_result(
     *,
     fs: float,
-    trim_removed: int = KIMORE_INITIAL_TRIM_SAMPLES,
+    trim_removed: int = KIMORE_INITIAL_DISCARDED_SAMPLES,
 ) -> dict:
     return {
         "fs_hz": fs,
         "n_initial_samples_removed": trim_removed,
+        "first_retained_matlab_sample": KIMORE_FIRST_RETAINED_MATLAB_SAMPLE,
+        "source_index_convention": "zero_based_python_index",
         "trimmed_length": 0,
         "filtered_signal": [],
         "maxima_indices": [],
@@ -148,7 +161,7 @@ def _run_ex5_pipeline(
 ) -> dict:
     """Shared offline Ex5 pipeline mechanics (trim, sign-flip, filter, extrema)."""
     angles = [float(a) for a in angle_stream]
-    if len(angles) <= KIMORE_INITIAL_TRIM_SAMPLES:
+    if len(angles) <= KIMORE_INITIAL_DISCARDED_SAMPLES:
         result = _base_result(fs=fs)
         result["warning"] = "insufficient_samples_after_trimming"
         return result
@@ -176,7 +189,7 @@ def _run_ex5_pipeline(
     min_idx, min_vals = detect_minima(filtered, distance)
 
     def _time_of(stream_index: int) -> float:
-        original_index = stream_index + KIMORE_INITIAL_TRIM_SAMPLES
+        original_index = stream_index + KIMORE_INITIAL_DISCARDED_SAMPLES
         if timestamps is not None and original_index < len(timestamps):
             return float(timestamps[original_index])
         return stream_index / fs
@@ -184,7 +197,7 @@ def _run_ex5_pipeline(
     events = [
         {
             "index": int(i),
-            "original_index": int(i + KIMORE_INITIAL_TRIM_SAMPLES),
+            "original_index": int(i + KIMORE_INITIAL_DISCARDED_SAMPLES),
             "time_s": _time_of(i),
             "type": "max",
         }
@@ -192,7 +205,7 @@ def _run_ex5_pipeline(
     ] + [
         {
             "index": int(i),
-            "original_index": int(i + KIMORE_INITIAL_TRIM_SAMPLES),
+            "original_index": int(i + KIMORE_INITIAL_DISCARDED_SAMPLES),
             "time_s": _time_of(i),
             "type": "min",
         }

@@ -16,6 +16,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "biogait"))
 
 from reference_temporal import (  # noqa: E402
+    KIMORE_FIRST_RETAINED_MATLAB_SAMPLE,
+    KIMORE_INITIAL_DISCARDED_SAMPLES,
     KIMORE_REFERENCE_FS_HZ,
     KIMORE_WRAP_DIFF_THRESHOLD_DEG,
     detect_maxima,
@@ -51,6 +53,23 @@ class TrimTests(unittest.TestCase):
 
     def test_negative_n_returns_copy(self):
         self.assertEqual(remove_initial_samples([1, 2], n=-1), [1, 2])
+
+    def test_matlab_10_to_end_semantics_by_default(self):
+        # MATLAB 1-based angle(10:end) discards samples 1..9 -> keeps 10,11,12.
+        seq = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+        self.assertEqual(remove_initial_samples(seq), [10, 11, 12])
+
+    def test_matlab_offsets_constants(self):
+        self.assertEqual(KIMORE_INITIAL_DISCARDED_SAMPLES, 9)
+        self.assertEqual(KIMORE_FIRST_RETAINED_MATLAB_SAMPLE, 10)
+
+    def test_zero_based_and_matlab_mapping_explicit(self):
+        # trimmed index 0 -> original Python index 9 -> MATLAB sample 10.
+        seq = list(range(1, 13))  # [1..12]
+        trimmed = remove_initial_samples(seq)
+        self.assertEqual(trimmed[0], 10)
+        self.assertEqual(seq[KIMORE_INITIAL_DISCARDED_SAMPLES], trimmed[0])
+        self.assertEqual(KIMORE_FIRST_RETAINED_MATLAB_SAMPLE, 10)
 
 
 class SignFlipCorrectionTests(unittest.TestCase):
@@ -130,7 +149,12 @@ class ExactReferenceAnalysisTests(unittest.TestCase):
         result = kimore_reference_ex5_temporal_analysis(stream, timestamps, fs=FS)
         self.assertIsNone(result["warning"])
         self.assertGreaterEqual(result["n_sign_corrections"], 0)
-        self.assertEqual(len(result["filtered_signal"]), len(stream) - 10)
+        # MATLAB 10:end -> 9 samples discarded in zero-based Python.
+        self.assertEqual(
+            len(result["filtered_signal"]),
+            len(stream) - KIMORE_INITIAL_DISCARDED_SAMPLES,
+        )
+        self.assertEqual(result["n_initial_samples_removed"], 9)
         maxima = result["maxima_indices"]
         minima = result["minima_indices"]
         self.assertGreater(len(maxima), 1)
@@ -152,10 +176,18 @@ class ExactReferenceAnalysisTests(unittest.TestCase):
     def test_original_index_offset_reported(self):
         stream = _periodic_knee_stream(seconds=20.0)
         result = kimore_reference_ex5_temporal_analysis(stream, fs=FS)
+        self.assertEqual(
+            result["first_retained_matlab_sample"], KIMORE_FIRST_RETAINED_MATLAB_SAMPLE
+        )
+        self.assertEqual(
+            result["source_index_convention"], "zero_based_python_index"
+        )
         for cand in result["event_candidates"]:
             self.assertEqual(
                 cand["original_index"], cand["index"] + result["n_initial_samples_removed"]
             )
+            # Event source index is zero-based: trimmed index 0 -> Python 9.
+            self.assertGreaterEqual(cand["original_index"], KIMORE_INITIAL_DISCARDED_SAMPLES)
 
     # ── missing samples / 30 Hz gating (FIX 4 / 5) ─────────────────────────
     def test_missing_samples_warning_no_filtering(self):
