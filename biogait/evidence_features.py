@@ -165,27 +165,44 @@ def euclidean_distance_3d(
     )
 
 
-def kimore_sagittal_knee_angle_yz(
-    hip: Mapping[str, float],
-    knee: Mapping[str, float],
-    ankle: Mapping[str, float],
-) -> float:
-    """KIMORE-style sagittal knee angle computed in the Y-Z plane (degrees).
+def kimore_reference_sagittal_knee_angle_yz(
+    hip: Mapping[str, float] | None,
+    knee: Mapping[str, float] | None,
+    ankle: Mapping[str, float] | None,
+) -> Optional[float]:
+    """Exact KIMORE Ex5 sagittal knee angle using the reviewed MATLAB convention.
 
-    Uses the same mathematical convention for left and right sides; it does
-    NOT produce correct/incorrect labels. Pure descriptive geometry.
+    For one side::
+
+        angle_deg = degrees(
+            atan2(hip_y - knee_y, hip_z - knee_z)
+            + atan2(knee_y - ankle_y, ankle_z - knee_z)
+        )
+
+    This is NOT a clamped 0..180 vector angle: the reference representation
+    can contain values outside that range, which is why the reference temporal
+    pipeline includes explicit sign/singularity handling.
+
+    Returns ``None`` when any required point is missing or the hip-knee or
+    knee-ankle segment is degenerate (zero length). It never fabricates a
+    0-degree measurement.
     """
-    v_hip = (hip["y"] - knee["y"], hip["z"] - knee["z"])
-    v_ankle = (ankle["y"] - knee["y"], ankle["z"] - knee["z"])
-    norm_hip = math.hypot(*v_hip)
-    norm_ankle = math.hypot(*v_ankle)
-    if norm_hip == 0 or norm_ankle == 0:
-        return 0.0
-    cos_theta = (v_hip[0] * v_ankle[0] + v_hip[1] * v_ankle[1]) / (
-        norm_hip * norm_ankle
-    )
-    cos_theta = max(-1.0, min(1.0, cos_theta))
-    return math.degrees(math.acos(cos_theta))
+    if hip is None or knee is None or ankle is None:
+        return None
+
+    hip_knee_y = hip["y"] - knee["y"]
+    hip_knee_z = hip["z"] - knee["z"]
+    knee_ankle_y = knee["y"] - ankle["y"]
+    ankle_knee_z = ankle["z"] - knee["z"]
+
+    if (hip_knee_y == 0 and hip_knee_z == 0) or (
+        knee_ankle_y == 0 and ankle_knee_z == 0
+    ):
+        return None
+
+    theta_hip = math.atan2(hip_knee_y, hip_knee_z)
+    theta_ankle = math.atan2(knee_ankle_y, ankle_knee_z)
+    return math.degrees(theta_hip + theta_ankle)
 
 
 def _triangle_area_heron(
@@ -326,7 +343,10 @@ def build_frame_evidence(
     If any required world landmark is missing or below the visibility gate,
     the evidence is marked unavailable and every research value is ``None``,
     with an explicit reason (``missing_world_landmarks`` or
-    ``low_landmark_visibility``).
+    ``low_landmark_visibility``). If all required landmarks are present but
+    a knee segment is degenerate (zero-length), the primary knee outcomes
+    are unavailable (``None``) and the reason is
+    ``degenerate_knee_geometry``; control factors remain valid measurements.
     """
     missing = missing_world_landmarks(landmarks, visibility_threshold)
     if missing:
@@ -364,6 +384,47 @@ def build_frame_evidence(
             },
         )
 
+    left_angle = kimore_reference_sagittal_knee_angle_yz(
+        landmarks["left_hip"],
+        landmarks["left_knee"],
+        landmarks["left_ankle"],
+    )
+    right_angle = kimore_reference_sagittal_knee_angle_yz(
+        landmarks["right_hip"],
+        landmarks["right_knee"],
+        landmarks["right_ankle"],
+    )
+
+    common_control_factors = {
+        **pairwise_control_factors(landmarks),
+        "torso_area_m2": torso_area_m2(
+            landmarks["left_shoulder"],
+            landmarks["right_shoulder"],
+            landmarks["left_hip"],
+            landmarks["right_hip"],
+        ),
+        **shoulder_coordinates(landmarks),
+    }
+
+    if left_angle is None or right_angle is None:
+        # Degenerate reference geometry: primary outcomes are None (never a
+        # fake 0-degree), made explicit in the quality reason.
+        return FrameEvidence(
+            frame_index=frame_index,
+            timestamp_seconds=timestamp_seconds,
+            quality={
+                "available": False,
+                "missing_landmarks": [],
+                "mean_visibility": mean_visibility(landmarks),
+                "reason": "degenerate_knee_geometry",
+            },
+            primary_outcomes={
+                "left_knee_sagittal_deg": left_angle,
+                "right_knee_sagittal_deg": right_angle,
+            },
+            control_factors=common_control_factors,
+        )
+
     return FrameEvidence(
         frame_index=frame_index,
         timestamp_seconds=timestamp_seconds,
@@ -374,27 +435,10 @@ def build_frame_evidence(
             "reason": "ok",
         },
         primary_outcomes={
-            "left_knee_sagittal_deg": kimore_sagittal_knee_angle_yz(
-                landmarks["left_hip"],
-                landmarks["left_knee"],
-                landmarks["left_ankle"],
-            ),
-            "right_knee_sagittal_deg": kimore_sagittal_knee_angle_yz(
-                landmarks["right_hip"],
-                landmarks["right_knee"],
-                landmarks["right_ankle"],
-            ),
+            "left_knee_sagittal_deg": left_angle,
+            "right_knee_sagittal_deg": right_angle,
         },
-        control_factors={
-            **pairwise_control_factors(landmarks),
-            "torso_area_m2": torso_area_m2(
-                landmarks["left_shoulder"],
-                landmarks["right_shoulder"],
-                landmarks["left_hip"],
-                landmarks["right_hip"],
-            ),
-            **shoulder_coordinates(landmarks),
-        },
+        control_factors=common_control_factors,
     )
 
 

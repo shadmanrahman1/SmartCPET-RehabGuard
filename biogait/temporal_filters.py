@@ -32,10 +32,10 @@ def kimore_reference_zero_phase_filter(
 ) -> np.ndarray:
     """KIMORE reference zero-phase low-pass filter (offline only).
 
-    Uses a Butterworth filter (order 3, 1 Hz cutoff, 30 Hz reference sample
-    rate by default) applied with :func:`scipy.signal.sosfiltfilt`, the
-    zero-phase equivalent of MATLAB's ``filtfilt`` (sosfiltfilt is the
-    documented SOS form of filtfilt).
+    Reproduces the reviewed MATLAB structure as directly as practical:
+
+    - ``[b, a] = butter(order=3, cutoff=1 Hz, fs=30 Hz)``
+    - ``filtfilt(b, a, x)``
 
     Classification: REFERENCE_DERIVED / OFFLINE ONLY / NON-CAUSAL.
 
@@ -51,8 +51,10 @@ def kimore_reference_zero_phase_filter(
             "kimore_reference_zero_phase_filter requires a longer finite "
             f"signal (got {finite.size} valid samples with order={order})."
         )
-    sos = signal.butter(order, cutoff_hz, btype="lowpass", fs=fs, output="sos")
-    return signal.sosfiltfilt(sos, finite)
+    b, a = signal.butter(
+        order, cutoff_hz, btype="lowpass", fs=fs, output="ba"
+    )
+    return signal.filtfilt(b, a, finite)
 
 
 class CausalKimoreButterworth:

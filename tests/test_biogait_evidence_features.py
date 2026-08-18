@@ -22,7 +22,7 @@ from evidence_features import (  # noqa: E402
     euclidean_distance_3d,
     extract_normalized_landmarks,
     extract_world_landmarks,
-    kimore_sagittal_knee_angle_yz,
+    kimore_reference_sagittal_knee_angle_yz,
     mean_visibility,
     missing_evidence,
     missing_world_landmarks,
@@ -119,31 +119,6 @@ class GeometryTests(unittest.TestCase):
         self.assertAlmostEqual(euclidean_distance_3d(a, b), 5.0)
         self.assertAlmostEqual(euclidean_distance_3d(a, a), 0.0)
 
-    def test_knee_angle_extended_is_180(self):
-        hip = _lm(0.0, 1.0, 0.0)
-        knee = _lm(0.0, 0.0, 0.0)
-        ankle = _lm(0.0, -1.0, 0.0)
-        self.assertAlmostEqual(
-            kimore_sagittal_knee_angle_yz(hip, knee, ankle), 180.0, places=4
-        )
-
-    def test_knee_angle_right_is_90(self):
-        hip = _lm(0.0, 1.0, 0.0)
-        knee = _lm(0.0, 0.0, 0.0)
-        ankle = _lm(0.0, 0.0, 1.0)
-        self.assertAlmostEqual(
-            kimore_sagittal_knee_angle_yz(hip, knee, ankle), 90.0, places=4
-        )
-
-    def test_left_and_right_share_same_function(self):
-        left = kimore_sagittal_knee_angle_yz(
-            _lm(0.0, 1.0, 0.0), _lm(0.0, 0.0, 0.0), _lm(0.0, 0.0, 1.0)
-        )
-        right = kimore_sagittal_knee_angle_yz(
-            _lm(5.0, 1.0, 0.0), _lm(5.0, 0.0, 0.0), _lm(5.0, 0.0, 1.0)
-        )
-        self.assertAlmostEqual(left, right, places=4)
-
     def test_torso_area_rectangle_is_0_5(self):
         ls = _lm(0.0, 1.0, 0.0)
         rs = _lm(0.5, 1.0, 0.0)
@@ -170,6 +145,75 @@ class GeometryTests(unittest.TestCase):
         coords = shoulder_coordinates(default_landmarks())
         self.assertAlmostEqual(coords["left_shoulder_x_m"], 0.0)
         self.assertAlmostEqual(coords["right_shoulder_z_m"], 0.0)
+
+
+def _acos_angle(hip, knee, ankle):
+    """Generic conventional acos 0..180 vector angle (test only)."""
+    v_hk = (hip["y"] - knee["y"], hip["z"] - knee["z"])
+    v_ak = (ankle["y"] - knee["y"], ankle["z"] - knee["z"])
+    n_hk = math.hypot(*v_hk)
+    n_ak = math.hypot(*v_ak)
+    cos_t = (v_hk[0] * v_ak[0] + v_hk[1] * v_ak[1]) / (n_hk * n_ak)
+    return math.degrees(math.acos(max(-1.0, min(1.0, cos_t))))
+
+
+class KimoreReferenceKneeTests(unittest.TestCase):
+    """Exact reviewed Ex5 atan2 knee-angle convention (FIX 1 / 16)."""
+
+    def test_exact_atan2_equation(self):
+        hip = _lm(0.0, 1.0, 0.0)
+        knee = _lm(0.0, 0.0, 0.0)
+        ankle = _lm(0.0, 0.0, 1.0)
+        expected = math.degrees(
+            math.atan2(hip["y"] - knee["y"], hip["z"] - knee["z"])
+            + math.atan2(knee["y"] - ankle["y"], ankle["z"] - knee["z"])
+        )
+        got = kimore_reference_sagittal_knee_angle_yz(hip, knee, ankle)
+        self.assertAlmostEqual(got, expected, places=6)
+
+    def test_atan2_differs_from_generic_acos(self):
+        # Hip above and BEHIND the knee; ankle below and BEHIND the knee.
+        hip = _lm(0.0, 2.0, -1.0)
+        knee = _lm(0.0, 0.0, 0.0)
+        ankle = _lm(0.0, -2.0, -1.0)
+        ref = kimore_reference_sagittal_knee_angle_yz(hip, knee, ankle)
+        generic = _acos_angle(hip, knee, ankle)
+        self.assertNotAlmostEqual(ref, generic, places=4)
+        expected = math.degrees(
+            math.atan2(hip["y"] - knee["y"], hip["z"] - knee["z"])
+            + math.atan2(knee["y"] - ankle["y"], ankle["z"] - knee["z"])
+        )
+        self.assertAlmostEqual(ref, expected, places=6)
+
+    def test_no_forced_0_180_clamp(self):
+        # Reference representation legitimately exceeds 180 degrees.
+        hip = _lm(0.0, 2.0, -1.0)
+        knee = _lm(0.0, 0.0, 0.0)
+        ankle = _lm(0.0, -2.0, -1.0)
+        ref = kimore_reference_sagittal_knee_angle_yz(hip, knee, ankle)
+        self.assertGreater(ref, 180.0)
+        self.assertLessEqual(ref, 360.0)
+
+    def test_degenerate_hip_knee_segment_is_none(self):
+        hip = _lm(0.0, 1.0, 0.0)
+        knee = _lm(0.0, 1.0, 0.0)  # zero-length hip-knee segment
+        ankle = _lm(0.0, 0.0, 0.0)
+        self.assertIsNone(
+            kimore_reference_sagittal_knee_angle_yz(hip, knee, ankle)
+        )
+
+    def test_degenerate_knee_ankle_segment_is_none(self):
+        hip = _lm(0.0, 1.0, 0.0)
+        knee = _lm(0.0, 0.0, 0.0)
+        ankle = _lm(0.0, 0.0, 0.0)  # zero-length knee-ankle segment
+        self.assertIsNone(
+            kimore_reference_sagittal_knee_angle_yz(hip, knee, ankle)
+        )
+
+    def test_missing_point_is_none(self):
+        self.assertIsNone(
+            kimore_reference_sagittal_knee_angle_yz(_lm(0, 1, 0), None, None)
+        )
 
 
 class CenteringTests(unittest.TestCase):
@@ -225,13 +269,23 @@ class FrameEvidenceTests(unittest.TestCase):
         self.assertFalse(evidence["quality"]["available"])
         self.assertIsNone(evidence["primary_outcomes"]["right_knee_sagittal_deg"])
 
-    def test_sagittal_angles_are_floats_in_expected_range(self):
+    def test_sagittal_angles_are_float_or_absent(self):
         evidence = build_frame_evidence(default_landmarks(), 0, 0.0)
         for key in ("left_knee_sagittal_deg", "right_knee_sagittal_deg"):
             val = evidence.primary_outcomes[key]
             self.assertIsInstance(val, float)
-            self.assertGreaterEqual(val, 0.0)
-            self.assertLessEqual(val, 180.0)
+
+    def test_degenerate_geometry_evidence_is_explicit(self):
+        scene = default_landmarks()
+        scene["left_knee"] = _lm(0.0, 1.0, 0.0)  # same as left_hip: degenerate
+        evidence = build_frame_evidence(scene, 0, 0.0)
+        self.assertFalse(evidence.quality["available"])
+        self.assertEqual(evidence.quality["reason"], "degenerate_knee_geometry")
+        self.assertEqual(evidence.quality["missing_landmarks"], [])
+        self.assertIsNone(evidence.primary_outcomes["left_knee_sagittal_deg"])
+        # The right side still computes; control factors remain valid geometry.
+        self.assertIsNotNone(evidence.primary_outcomes["right_knee_sagittal_deg"])
+        self.assertTrue(evidence.control_factors["torso_area_m2"] > 0.0)
 
     def test_to_dict_roundtrip(self):
         evidence = build_frame_evidence(default_landmarks(), 1, 0.033).to_dict()

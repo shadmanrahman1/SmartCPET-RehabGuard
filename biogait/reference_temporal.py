@@ -1,27 +1,36 @@
 """KIMORE reference temporal analysis for Exercise 5 (squat) — OFFLINE ONLY.
 
-Classification: REFERENCE_DERIVED / OFFLINE / NOT REALTIME.
+Two deliberately separate paths:
 
-This implements a research/comparison reference path that reproduces the
-behaviour of the reviewed KIMORE wrapper source
-(``matlab/matlab_original/feat_extract_Ex5.m`` and ``filtering.m``):
+- :func:`kimore_reference_ex5_temporal_analysis` — EXACT reference path.
+  Classification: REFERENCE_DERIVED / OFFLINE / NOT REALTIME. Reproduces the
+  reviewed KIMORE wrapper source conventions
+  (``matlab/matlab_original/feat_extract_Ex5.m`` and ``filtering.m``):
 
-1. remove the initial 10 samples from the knee-angle stream;
-2. reference singularity handling (sign correction when the consecutive
-   knee-angle difference exceeds 100 degrees);
-3. KIMORE zero-phase reference filter (order 3, 1 Hz, 30 Hz);
-4. maxima detection at ``max(signal)/sqrt(2)``;
-5. minima detection on ``max(signal) - signal`` at its
-   ``max/ sqrt(2)`` threshold;
-6. reference minimum peak distance ``floor(n_samples / 10)``.
+  1. remove the initial 10 samples from the knee-angle stream;
+  2. reference sign-flip handling (negate a sample when the consecutive
+     difference exceeds 100 degrees — NOT a +/-360 unwrap);
+  3. KIMORE reference zero-phase filter (order 3, 1 Hz, 30 Hz; ba-form
+     Butterworth + ``filtfilt``);
+  4. maxima detection at ``max(signal)/sqrt(2)``;
+  5. minima detection on ``max(signal) - signal`` at its ``max/sqrt(2)``
+     threshold;
+  6. reference minimum peak distance ``floor(n_samples / 10)``.
 
-Detected candidates are NOT clinically valid repetitions. This path does NOT
-produce pass/fail or any clinical decision.
+  The exact path requires a uniform, complete sample stream at the 30 Hz
+  reference convention. Missing samples or a non-30 Hz rate return a
+  structured warning and filtering/peak detection is NOT run (no silent
+  resampling is introduced in this sprint).
 
-The original KIMORE acquisition protocol involved repeated exercise
-execution; its full-sequence peak settings are not automatically valid for
-an arbitrary live session length. That limitation is documented in the deep
-status output too.
+- :func:`kimore_adapted_ex5_temporal_analysis` — actual-frame-rate path.
+  Classification: ENGINEERING_ADAPTED. Uses the supplied frame rate while
+  retaining the 1 Hz / order-3 filter concept. It is NOT the exact KIMORE
+  reference pipeline and its results are not REFERENCE_DERIVED.
+
+Detected candidates are NOT clinically valid repetitions. This module does
+NOT produce pass/fail or any clinical decision. The KIMORE acquisition
+protocol involved repeated exercise execution; its full-sequence peak
+settings are not automatically valid for an arbitrary live session length.
 """
 from __future__ import annotations
 
@@ -36,6 +45,7 @@ from temporal_filters import kimore_reference_zero_phase_filter
 KIMORE_INITIAL_TRIM_SAMPLES = 10
 KIMORE_WRAP_DIFF_THRESHOLD_DEG = 100.0
 KIMORE_PEAK_HEIGHT_FACTOR = 1.0 / math.sqrt(2.0)
+KIMORE_REFERENCE_FS_HZ = 30.0
 
 
 def remove_initial_samples(
@@ -47,16 +57,24 @@ def remove_initial_samples(
     return list(values[n:]) if n < len(values) else []
 
 
-def kimore_wrap_correction(
+def kimore_reference_sign_flip_correction(
     angles: Sequence[float],
     threshold_deg: float = KIMORE_WRAP_DIFF_THRESHOLD_DEG,
 ) -> tuple[list[float], int]:
-    """Reference singularity/sign handling for wrapped knee-angle samples.
+    """Exact KIMORE reference sign-flip correction.
 
-    For each consecutive pair, when ``abs(current - previous_corrected)``
-    exceeds the threshold (100 degrees by default), the current sample is
-    shifted by the appropriate multiple of 360 degrees (sign correction
-    represented by the reference source) so discontinuities are unwrapped.
+    Source logic concept (Matlab ``feat_extract_Ex5.m`` convention)::
+
+        for j in range(len(angle) - 1):
+            difference = angle[j+1] - angle[j]
+            if difference < -100 or difference > 100:
+                angle[j+1] = -angle[j+1]
+
+    The sequence is modified in place conceptually, so subsequent differences
+    use previously corrected values. This is a sign flip (negation), NOT a
+    generic +/-360-degree angle unwrap.
+
+    Classification: REFERENCE_DERIVED.
 
     Returns ``(corrected, n_corrections)``.
     """
@@ -67,9 +85,9 @@ def kimore_wrap_correction(
             corrected.append(float(sample))
             continue
         prev = corrected[-1]
-        d = float(sample) - prev
-        if abs(d) > threshold_deg:
-            sample = float(sample) - 360.0 * (1.0 if d > 0 else -1.0)
+        difference = float(sample) - prev
+        if difference < -threshold_deg or difference > threshold_deg:
+            sample = -float(sample)
             corrections += 1
         corrected.append(float(sample))
     return corrected, corrections
@@ -104,81 +122,56 @@ def detect_minima(
     return [int(i) for i in idx], [float(v) for v in filtered[idx]]
 
 
-def kimore_reference_ex5_temporal_analysis(
-    angle_stream: Sequence[Union[float, int]],
-    timestamps: Optional[Sequence[float]] = None,
-    fs: float = 30.0,
+def _base_result(
+    *,
+    fs: float,
+    trim_removed: int = KIMORE_INITIAL_TRIM_SAMPLES,
 ) -> dict:
-    """Run the offline KIMORE reference temporal analysis on one knee stream.
+    return {
+        "fs_hz": fs,
+        "n_initial_samples_removed": trim_removed,
+        "trimmed_length": 0,
+        "filtered_signal": [],
+        "maxima_indices": [],
+        "maxima_values": [],
+        "minima_indices": [],
+        "minima_values": [],
+        "event_candidates": [],
+        "candidate_repetition_durations_s": [],
+    }
 
-    ``angle_stream`` must be a finite, valid (non-missing) sequence of knee
-    sagittal angles. ``timestamps`` (optional) must be the aligned
-    per-sample timestamps; when omitted, time is derived from ``fs``.
 
-    Returns a dict with the filtered signal, maxima/minima indices and
-    values, reference repetition-event candidates, and candidate
-    peak-to-peak repetition durations (seconds). Candidates are reference
-    events — not clinically validated repetitions and not pass/fail.
-    """
+def _run_ex5_pipeline(
+    angle_stream: Sequence[float],
+    timestamps: Optional[Sequence[float]],
+    fs: float,
+) -> dict:
+    """Shared offline Ex5 pipeline mechanics (trim, sign-flip, filter, extrema)."""
     angles = [float(a) for a in angle_stream]
     if len(angles) <= KIMORE_INITIAL_TRIM_SAMPLES:
-        return {
-            "classification": "REFERENCE_DERIVED",
-            "offline": True,
-            "warning": "insufficient_samples_after_trimming",
-            "fs_hz": fs,
-            "n_initial_samples_removed": KIMORE_INITIAL_TRIM_SAMPLES,
-            "trimmed_length": 0,
-            "filtered_signal": [],
-            "maxima_indices": [],
-            "maxima_values": [],
-            "minima_indices": [],
-            "minima_values": [],
-            "event_candidates": [],
-            "candidate_repetition_durations_s": [],
-        }
+        result = _base_result(fs=fs)
+        result["warning"] = "insufficient_samples_after_trimming"
+        return result
 
     trimmed = remove_initial_samples(angles)
-    corrected, n_corrections = kimore_wrap_correction(trimmed)
+    corrected, n_corrections = kimore_reference_sign_flip_correction(trimmed)
 
     try:
         filtered = kimore_reference_zero_phase_filter(corrected, fs=fs)
     except ValueError as exc:
-        return {
-            "classification": "REFERENCE_DERIVED",
-            "offline": True,
-            "warning": f"insufficient_samples_for_reference_filter: {exc}",
-            "fs_hz": fs,
-            "n_initial_samples_removed": KIMORE_INITIAL_TRIM_SAMPLES,
-            "trimmed_length": len(corrected),
-            "filtered_signal": [],
-            "maxima_indices": [],
-            "maxima_values": [],
-            "minima_indices": [],
-            "minima_values": [],
-            "event_candidates": [],
-            "candidate_repetition_durations_s": [],
-        }
+        result = _base_result(fs=fs)
+        result["trimmed_length"] = len(corrected)
+        result["warning"] = f"insufficient_samples_for_reference_filter: {exc}"
+        return result
 
-    n_filtered = len(filtered)
-    if n_filtered < 3:
-        return {
-            "classification": "REFERENCE_DERIVED",
-            "offline": True,
-            "warning": "insufficient_filtered_samples",
-            "fs_hz": fs,
-            "n_initial_samples_removed": KIMORE_INITIAL_TRIM_SAMPLES,
-            "trimmed_length": len(corrected),
-            "filtered_signal": [float(v) for v in filtered],
-            "maxima_indices": [],
-            "maxima_values": [],
-            "minima_indices": [],
-            "minima_values": [],
-            "event_candidates": [],
-            "candidate_repetition_durations_s": [],
-        }
+    if len(filtered) < 3:
+        result = _base_result(fs=fs)
+        result["trimmed_length"] = len(corrected)
+        result["filtered_signal"] = [float(v) for v in filtered]
+        result["warning"] = "insufficient_filtered_samples"
+        return result
 
-    distance = _min_peak_distance(n_filtered)
+    distance = _min_peak_distance(len(filtered))
     max_idx, max_vals = detect_maxima(filtered, distance)
     min_idx, min_vals = detect_minima(filtered, distance)
 
@@ -189,69 +182,144 @@ def kimore_reference_ex5_temporal_analysis(
         return stream_index / fs
 
     events = [
-        {"index": int(i), "original_index": int(i + KIMORE_INITIAL_TRIM_SAMPLES),
-         "time_s": _time_of(i), "type": "max"}
+        {
+            "index": int(i),
+            "original_index": int(i + KIMORE_INITIAL_TRIM_SAMPLES),
+            "time_s": _time_of(i),
+            "type": "max",
+        }
         for i in max_idx
     ] + [
-        {"index": int(i), "original_index": int(i + KIMORE_INITIAL_TRIM_SAMPLES),
-         "time_s": _time_of(i), "type": "min"}
+        {
+            "index": int(i),
+            "original_index": int(i + KIMORE_INITIAL_TRIM_SAMPLES),
+            "time_s": _time_of(i),
+            "type": "min",
+        }
         for i in min_idx
     ]
     events.sort(key=lambda e: e["index"])
 
-    # Candidate repetition durations from consecutive maxima (peak-to-peak).
     durations: list[float] = []
     for i in range(1, len(max_idx)):
         durations.append(_time_of(max_idx[i]) - _time_of(max_idx[i - 1]))
     durations = [d for d in durations if d > 0]
 
-    return {
-        "classification": "REFERENCE_DERIVED",
-        "offline": True,
-        "warning": None,
-        "fs_hz": fs,
-        "n_initial_samples_removed": KIMORE_INITIAL_TRIM_SAMPLES,
-        "n_sign_corrections": n_corrections,
-        "trimmed_length": len(corrected),
-        "min_peak_distance": distance,
-        "filtered_signal": [float(v) for v in filtered],
-        "maxima_indices": max_idx,
-        "maxima_values": max_vals,
-        "minima_indices": min_idx,
-        "minima_values": min_vals,
-        "event_candidates": events,
-        "candidate_repetition_durations_s": durations,
-    }
+    result = _base_result(fs=fs)
+    result.update(
+        {
+            "warning": None,
+            "n_sign_corrections": n_corrections,
+            "trimmed_length": len(corrected),
+            "min_peak_distance": distance,
+            "filtered_signal": [float(v) for v in filtered],
+            "maxima_indices": max_idx,
+            "maxima_values": max_vals,
+            "minima_indices": min_idx,
+            "minima_values": min_vals,
+            "event_candidates": events,
+            "candidate_repetition_durations_s": durations,
+        }
+    )
+    return result
 
 
-def merge_side_events(
+def kimore_reference_ex5_temporal_analysis(
+    angle_stream: Sequence[Union[float, int, None]],
+    timestamps: Optional[Sequence[float]] = None,
+    fs: float = KIMORE_REFERENCE_FS_HZ,
+) -> dict:
+    """EXACT KIMORE reference path for one knee stream (OFFLINE, not realtime).
+
+    Only runs when the stream is complete (no ``None`` samples) and the
+    sample rate is the 30 Hz reference convention. Otherwise returns a
+    structured warning and does NOT run filtering/peak detection:
+
+    - ``missing_samples_require_resampling`` — a ``None`` sample is present.
+    - ``reference_requires_30hz_or_resampling`` — ``fs`` is not 30 Hz
+      (within a tiny floating-point tolerance used only to distinguish
+      30.0 from representation noise).
+
+    Classification: REFERENCE_DERIVED.
+    """
+    if any(v is None for v in angle_stream):
+        result = _base_result(fs=fs)
+        result["classification"] = "REFERENCE_DERIVED"
+        result["offline"] = True
+        result["warning"] = "missing_samples_require_resampling"
+        return result
+
+    if not math.isclose(float(fs), KIMORE_REFERENCE_FS_HZ, rel_tol=0.0, abs_tol=1e-6):
+        result = _base_result(fs=fs)
+        result["classification"] = "REFERENCE_DERIVED"
+        result["offline"] = True
+        result["warning"] = "reference_requires_30hz_or_resampling"
+        return result
+
+    result = _run_ex5_pipeline(angle_stream, timestamps, fs)
+    result["classification"] = "REFERENCE_DERIVED"
+    result["offline"] = True
+    return result
+
+
+def kimore_adapted_ex5_temporal_analysis(
+    angle_stream: Sequence[Union[float, int, None]],
+    timestamps: Optional[Sequence[float]] = None,
+    fs: float = 30.0,
+) -> dict:
+    """ACTUAL-frame-rate ADAPTED analysis path.
+
+    Classification: ENGINEERING_ADAPTED — NOT the exact KIMORE reference
+    pipeline. Uses the supplied frame rate while retaining the 1 Hz,
+    order-3 filter concept. Missing samples return
+    ``missing_samples_require_resampling`` and no filtering is applied.
+    """
+    if any(v is None for v in angle_stream):
+        result = _base_result(fs=fs)
+        result["classification"] = "ENGINEERING_ADAPTED"
+        result["offline"] = True
+        result["warning"] = "missing_samples_require_resampling"
+        return result
+
+    result = _run_ex5_pipeline(angle_stream, timestamps, fs)
+    result["classification"] = "ENGINEERING_ADAPTED"
+    result["offline"] = True
+    result["adapted_note"] = (
+        "Uses the actual supplied frame rate; not the exact 30 Hz KIMORE "
+        "reference pipeline. Results are engineering-adapted, not "
+        "REFERENCE_DERIVED."
+    )
+    return result
+
+
+def side_event_summary(
     left_analysis: Optional[dict],
     right_analysis: Optional[dict],
 ) -> dict:
-    """Merge per-side maxima candidates into a single event summary.
+    """Per-side reference event summary; no combined/bilateral repetition count.
 
-    Engineering-pragmatic, documented choice: the squat is a bilateral
-    exercise, so maxima event candidates from either knee are merged and
-    counted once via a time-sorted union. Does NOT claim clinical validity.
+    Repetition-event candidate counts and peak-to-peak durations are reported
+    per knee side. Bilateral pairing is explicitly deferred (no temporal
+    pairing tolerance is invented in this sprint); `bilateral_pairing_status`
+    is always ``"deferred"``.
     """
-    left_events = (
-        left_analysis.get("event_candidates", []) if left_analysis else []
-    )
-    right_events = (
-        right_analysis.get("event_candidates", []) if right_analysis else []
-    )
-    left_max = [e for e in left_events if e["type"] == "max"]
-    right_max = [e for e in right_events if e["type"] == "max"]
+    def _count(analysis: Optional[dict]) -> int:
+        if not analysis:
+            return 0
+        return len(analysis.get("maxima_indices", []))
 
-    union = sorted(left_max + right_max, key=lambda e: (e["time_s"], e["index"]))
-    durations: list[float] = []
-    for i in range(1, len(union)):
-        durations.append(union[i]["time_s"] - union[i - 1]["time_s"])
-    durations = [d for d in durations if d > 0]
+    def _durations(analysis: Optional[dict]) -> list[float]:
+        if not analysis:
+            return []
+        return [
+            float(d)
+            for d in analysis.get("candidate_repetition_durations_s", [])
+        ]
 
     return {
-        "n_left_maxima": len(left_max),
-        "n_right_maxima": len(right_max),
-        "n_reference_event_candidates": len(union),
-        "candidate_repetition_durations_s": durations,
+        "left_reference_maxima_count": _count(left_analysis),
+        "right_reference_maxima_count": _count(right_analysis),
+        "left_candidate_repetition_durations_s": _durations(left_analysis),
+        "right_candidate_repetition_durations_s": _durations(right_analysis),
+        "bilateral_pairing_status": "deferred",
     }

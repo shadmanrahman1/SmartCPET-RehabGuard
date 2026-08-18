@@ -78,6 +78,35 @@ class AccumulatorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             acc.add({"frame_index": 0})
 
+    def test_aligned_arrays_preserve_every_frame_and_none(self):
+        acc = SessionAccumulator()
+        acc.add(_evidence(0, 0.0, available=False))
+        ev1 = _evidence(1, 0.033, left=120.0, right=118.0)
+        ev1["primary_outcomes"]["left_knee_sagittal_deg"] = None
+        acc.add(ev1)
+        acc.add(_evidence(2, 0.066, left=130.0, right=128.0))
+        aligned = acc.aligned_arrays()
+        self.assertEqual(aligned["timestamps_s"], [0.0, 0.033, 0.066])
+        self.assertEqual(aligned["left_knee_sagittal_deg"], [None, None, 130.0])
+        self.assertEqual(aligned["right_knee_sagittal_deg"], [None, 118.0, 128.0])
+        # Control-factor streams aligned too: every frame contributes an entry.
+        self.assertEqual(len(aligned["torso_area_m2"]), 3)
+        self.assertIsNone(aligned["torso_area_m2"][0])
+
+    def test_retained_window_counters_separate_from_lifetime(self):
+        acc = SessionAccumulator(max_frames=4)
+        for i in range(6):
+            acc.add(_evidence(i, i * 0.1, available=(i % 2 == 0)))
+        # lifetime
+        self.assertEqual(acc.total_added, 6)
+        self.assertEqual(acc.available_count, 3)
+        self.assertEqual(acc.unavailable_count, 3)
+        # retained window: frames 2,3,4,5 -> available: 2,4 -> 2 of 4
+        self.assertEqual(acc.retained_frames, 4)
+        self.assertEqual(acc.retained_available_count, 2)
+        self.assertEqual(acc.retained_unavailable_count, 2)
+        self.assertAlmostEqual(acc.retained_availability_rate, 0.5)
+
     def test_finite_arrays_exclude_unavailable_frames(self):
         acc = SessionAccumulator()
         acc.add(_evidence(0, 0.0, available=False))
@@ -136,6 +165,30 @@ class DescriptiveFeaturesTests(unittest.TestCase):
         self.assertAlmostEqual(desc["right_peak_abs_angular_velocity_deg_s"], 20.0)
         self.assertAlmostEqual(desc["right_mean_abs_angular_velocity_deg_s"], 20.0)
 
+    def test_angular_velocity_skips_gaps_index_aligned(self):
+        # None gap in the middle: the interval across the gap must NOT be
+        # bridged as if the missing frame did not exist.
+        arrays = {
+            "timestamps_s": [0.0, 1.0, 2.0, 3.0],
+            "left_knee_sagittal_deg": [100.0, 130.0, None, 100.0],
+            "right_knee_sagittal_deg": [100.0, 100.0, None, 130.0],
+        }
+        desc = descriptive_temporal_features(arrays)
+        self.assertEqual(desc["left_angular_velocity_deg_s"], [30.0])
+        self.assertEqual(desc["right_angular_velocity_deg_s"], [0.0])
+        # The (100->100 across 2s) bridge must not appear.
+        self.assertNotIn(0.0, desc["left_angular_velocity_deg_s"])
+
+    def test_angular_velocity_requires_increasing_timestamps(self):
+        arrays = {
+            "timestamps_s": [0.0, 1.0, 1.0],
+            "left_knee_sagittal_deg": [100.0, 120.0, 140.0],
+            "right_knee_sagittal_deg": [100.0, 100.0, 100.0],
+        }
+        desc = descriptive_temporal_features(arrays)
+        # dt=0 between index1 and index2 -> skipped; only first interval kept.
+        self.assertEqual(len(desc["left_angular_velocity_deg_s"]), 1)
+
     def test_insufficient_data_yields_none(self):
         arrays = {
             "timestamps_s": [0.0],
@@ -147,19 +200,27 @@ class DescriptiveFeaturesTests(unittest.TestCase):
         self.assertIsNone(desc["left_knee_rom_deg"])
         self.assertIsNone(desc["effective_sample_rate_hz"])
 
-    def test_reference_summary_features(self):
+    def test_reference_summary_features_per_side(self):
         arrays = {
             "timestamps_s": [0.0, 2.0, 4.0],
             "left_knee_sagittal_deg": [100.0, 140.0, 100.0],
             "right_knee_sagittal_deg": [100.0, 140.0, 100.0],
         }
         summary = {
-            "n_reference_event_candidates": 3,
-            "candidate_repetition_durations_s": [2.0, 2.0],
+            "left_reference_maxima_count": 2,
+            "right_reference_maxima_count": 1,
+            "left_candidate_repetition_durations_s": [2.0, 2.0],
+            "right_candidate_repetition_durations_s": [4.0],
+            "bilateral_pairing_status": "deferred",
         }
         desc = descriptive_temporal_features(arrays, reference_summary=summary)
-        self.assertEqual(desc["n_reference_event_candidates"], 3)
-        self.assertEqual(desc["candidate_repetition_durations_s"], [2.0, 2.0])
+        self.assertEqual(desc["left_reference_maxima_count"], 2)
+        self.assertEqual(desc["right_reference_maxima_count"], 1)
+        self.assertEqual(desc["left_candidate_repetition_durations_s"], [2.0, 2.0])
+        self.assertEqual(desc["right_candidate_repetition_durations_s"], [4.0])
+        self.assertEqual(desc["bilateral_pairing_status"], "deferred")
+        self.assertNotIn("n_reference_event_candidates", desc)
+        self.assertNotIn("candidate_repetition_durations_s", desc)
 
     def test_no_clinical_fields_emitted(self):
         arrays = {

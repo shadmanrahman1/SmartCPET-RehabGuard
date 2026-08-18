@@ -5,16 +5,22 @@ Contains a bounded session accumulator and DESCRIPTIVE temporal features.
 All features here are descriptive kinematics only — they are NOT clinical
 scores, pass/fail, risk, or rehabilitation-quality judgements. No clinical
 thresholds live in this module.
+
+Data model: frames are retained in arrival order. ``aligned_arrays()``
+preserves EVERY retained frame, keeping ``None`` entries for unavailable/
+no-pose frames so temporal gaps are never silently compressed.
+``finite_arrays()`` (valid-only) is used only where valid-only alignment is
+explicitly required (e.g. effective sampling-rate estimation).
 """
 from __future__ import annotations
 
 from collections import deque
-from typing import Any, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
 
 from evidence_features import RESEARCH_EXERCISE
-from reference_temporal import merge_side_events
+from reference_temporal import side_event_summary
 
 SESSION_SCHEMA_VERSION = "1.0"
 
@@ -43,14 +49,33 @@ _REQUIRED_EVIDENCE_KEYS = (
     "primary_outcomes",
 )
 
+# Structural data-safety policy: forbidden KEY NAMES (recursive). Values are
+# NOT scanned for substrings (that would reject benign scientific text such as
+# "landmark name"); only these exact key names are rejected.
+FORBIDDEN_EXPORT_KEYS = {
+    "patient",
+    "patient_name",
+    "participant_name",
+    "subject_name",
+    "subject_id",
+    "email",
+}
+
 
 class SessionAccumulator:
     """Bounded, testable session accumulator for frame evidence.
 
     Accepts frame-evidence dicts (e.g. ``FrameEvidence.to_dict()``), keeps a
-    bounded window in arrival order, tracks dropped/unavailable frames, and
-    exports finite arrays built only from frames whose research evidence is
-    available. Invalid/missing samples are never mixed in silently.
+    bounded window in arrival order, and distinguishes:
+
+    - lifetime counters (``total_added``, ``available_count``,
+      ``unavailable_count``), and
+    - retained-window counters (``retained_available_count``,
+      ``retained_unavailable_count``, ``retained_availability_rate``) for the
+      rolling live window.
+
+    ``aligned_arrays()`` preserves every retained frame (missing values stay
+    ``None``); invalid/missing samples are never dropped silently.
     """
 
     def __init__(self, max_frames: Optional[int] = None) -> None:
@@ -81,7 +106,7 @@ class SessionAccumulator:
         else:
             self._unavailable += 1
 
-    # ── counters ──────────────────────────────────────────────────────────
+    # ── lifetime counters ─────────────────────────────────────────────────
     @property
     def total_added(self) -> int:
         return self._added
@@ -102,17 +127,66 @@ class SessionAccumulator:
     def retained_frames(self) -> int:
         return len(self._frames)
 
+    # ── retained-window counters ──────────────────────────────────────────
+    @property
+    def retained_available_count(self) -> int:
+        return sum(
+            1 for f in self._frames if f["quality"].get("available")
+        )
+
+    @property
+    def retained_unavailable_count(self) -> int:
+        return self.retained_frames - self.retained_available_count
+
+    @property
+    def retained_availability_rate(self) -> Optional[float]:
+        if not self._frames:
+            return None
+        return self.retained_available_count / self.retained_frames
+
     # ── exports ───────────────────────────────────────────────────────────
     def frames(self) -> list[dict]:
         return [dict(f) for f in self._frames]
 
-    def finite_arrays(self) -> dict[str, list[float]]:
-        """Finite arrays from available frames only (aligned by index).
+    def aligned_arrays(self) -> dict[str, list[Optional[float]]]:
+        """Aligned arrays preserving EVERY retained frame.
 
-        Missing samples are excluded, not zero-padded. When no available
-        frames exist, every stream is an empty list.
+        Each stream has one entry per retained frame in arrival order.
+        Unavailable/no-pose frames remain explicit ``None`` entries — no
+        sample is silently removed or zero-filled.
         """
-        arrays: dict[str, list[float]] = {name: [] for name in SELECTED_CONTROL_FACTOR_STREAMS}
+        arrays: dict[str, list[Optional[float]]] = {
+            name: [] for name in SELECTED_CONTROL_FACTOR_STREAMS
+        }
+        arrays.update(
+            {
+                "timestamps_s": [],
+                "left_knee_sagittal_deg": [],
+                "right_knee_sagittal_deg": [],
+            }
+        )
+        for frame in self._frames:
+            arrays["timestamps_s"].append(float(frame["timestamp_seconds"]))
+            arrays["left_knee_sagittal_deg"].append(
+                frame["primary_outcomes"]["left_knee_sagittal_deg"]
+            )
+            arrays["right_knee_sagittal_deg"].append(
+                frame["primary_outcomes"]["right_knee_sagittal_deg"]
+            )
+            for name in SELECTED_CONTROL_FACTOR_STREAMS:
+                value = frame["control_factors"].get(name)
+                arrays[name].append(float(value) if value is not None else None)
+        return arrays
+
+    def finite_arrays(self) -> dict[str, list[float]]:
+        """Valid-only arrays (available frames), aligned by output index.
+
+        Used where valid-only data is explicitly acceptable (e.g. sample-rate
+        estimation). For gap-preserving analysis prefer :meth:`aligned_arrays`.
+        """
+        arrays: dict[str, list[float]] = {
+            name: [] for name in SELECTED_CONTROL_FACTOR_STREAMS
+        }
         arrays.update(
             {
                 "timestamps_s": [],
@@ -136,10 +210,9 @@ class SessionAccumulator:
         return arrays
 
     def effective_sample_rate(self) -> Optional[float]:
-        """Effective sampling rate (Hz) estimated from available timestamps.
+        """Effective sampling rate (Hz) from valid timestamps (median interval).
 
-        Uses the median of consecutive positive inter-sample intervals to be
-        robust against dropped frames. Returns None with <2 samples.
+        Returns None with fewer than two valid samples.
         """
         timestamps = self.finite_arrays()["timestamps_s"]
         if len(timestamps) < 2:
@@ -159,24 +232,36 @@ class SessionAccumulator:
 
 # ── Descriptive temporal features (Phase G) ───────────────────────────────────
 
-def _range_deg(values: Sequence[float]) -> Optional[float]:
+def _range_deg(values: Sequence[Optional[float]]) -> Optional[float]:
     finite = [float(v) for v in values if v is not None]
     if len(finite) < 2:
         return None
     return max(finite) - min(finite)
 
 
-def _angular_velocity(
-    values: Sequence[float], timestamps: Sequence[float]
+def _aligned_angular_velocity(
+    values: Sequence[Optional[float]],
+    timestamps: Sequence[Optional[float]],
 ) -> list[float]:
-    finite = [float(v) for v in values if v is not None]
-    if len(finite) < 2 or len(timestamps) < 2:
-        return []
-    ts = np.asarray([float(t) for t in timestamps[: len(finite)]])
-    dt = np.diff(ts)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        omega = np.diff(finite) / dt
-    return [float(v) for v in omega[np.isfinite(omega)]]
+    """Index-aligned finite-difference angular velocity (deg/s).
+
+    An interval is computed ONLY when both adjacent angle values are finite
+    and both aligned timestamps are valid and strictly increasing. Gaps /
+    missing frames are skipped — never bridged as though they did not exist.
+    """
+    result: list[float] = []
+    for i in range(1, len(values)):
+        a_prev, a_cur = values[i - 1], values[i]
+        t_prev, t_cur = timestamps[i - 1], timestamps[i]
+        if a_prev is None or a_cur is None:
+            continue
+        if t_prev is None or t_cur is None:
+            continue
+        dt = t_cur - t_prev
+        if dt <= 0:
+            continue
+        result.append((a_cur - a_prev) / dt)
+    return result
 
 
 def _abs_stats_deg_s(values: Sequence[float]) -> tuple[Optional[float], Optional[float]]:
@@ -187,34 +272,39 @@ def _abs_stats_deg_s(values: Sequence[float]) -> tuple[Optional[float], Optional
 
 
 def descriptive_temporal_features(
-    arrays: dict[str, list[float]],
+    aligned_arrays: Mapping[str, Sequence[Optional[float]]],
     reference_summary: Optional[dict] = None,
     fs: Optional[float] = None,
 ) -> dict:
-    """DESCRIPTIVE temporal features from valid angle/time streams.
+    """DESCRIPTIVE temporal features from index-aligned angle/time streams.
 
     These are descriptive kinematics only — never good/bad, correct/
     incorrect, risk, or a rehabilitation score. Values are None when data
-    is insufficient (never faked).
+    is insufficient (never faked). Reference event counts and candidate
+    durations are reported per side; bilateral pairing is deferred.
     """
-    timestamps = arrays.get("timestamps_s", [])
-    left = arrays.get("left_knee_sagittal_deg", [])
-    right = arrays.get("right_knee_sagittal_deg", [])
+    timestamps = list(aligned_arrays.get("timestamps_s", []))
+    left = list(aligned_arrays.get("left_knee_sagittal_deg", []))
+    right = list(aligned_arrays.get("right_knee_sagittal_deg", []))
 
     session_duration = None
-    if len(timestamps) >= 2:
+    if len(timestamps) >= 2 and timestamps[0] is not None and timestamps[-1] is not None:
         session_duration = float(timestamps[-1] - timestamps[0])
 
     effective_fs = fs
     if effective_fs is None and len(timestamps) >= 2:
-        diffs = [b - a for a, b in zip(timestamps, timestamps[1:]) if b - a > 0]
+        diffs = [
+            b - a
+            for a, b in zip(timestamps, timestamps[1:])
+            if a is not None and b is not None and b > a
+        ]
         if diffs:
             median_dt = float(np.median(diffs))
             if median_dt > 0:
                 effective_fs = 1.0 / median_dt
 
-    left_omega = _angular_velocity(left, timestamps)
-    right_omega = _angular_velocity(right, timestamps)
+    left_omega = _aligned_angular_velocity(left, timestamps)
+    right_omega = _aligned_angular_velocity(right, timestamps)
     left_peak, left_mean = _abs_stats_deg_s(left_omega)
     right_peak, right_mean = _abs_stats_deg_s(right_omega)
 
@@ -226,11 +316,18 @@ def descriptive_temporal_features(
         else None
     )
 
-    n_candidates = None
-    durations: Optional[list[float]] = None
     if reference_summary:
-        n_candidates = reference_summary.get("n_reference_event_candidates")
-        durations = reference_summary.get("candidate_repetition_durations_s")
+        n_left = reference_summary.get("left_reference_maxima_count")
+        n_right = reference_summary.get("right_reference_maxima_count")
+        left_durations = reference_summary.get(
+            "left_candidate_repetition_durations_s"
+        )
+        right_durations = reference_summary.get(
+            "right_candidate_repetition_durations_s"
+        )
+    else:
+        n_left = n_right = None
+        left_durations = right_durations = None
 
     return {
         "session_duration_s": session_duration,
@@ -246,12 +343,19 @@ def descriptive_temporal_features(
         "right_mean_abs_angular_velocity_deg_s": _round_optional(right_mean),
         "left_angular_velocity_deg_s": [round(v, 4) for v in left_omega],
         "right_angular_velocity_deg_s": [round(v, 4) for v in right_omega],
-        "n_reference_event_candidates": n_candidates,
-        "candidate_repetition_durations_s": (
-            [round(float(d), 4) for d in durations]
-            if durations is not None
+        "left_reference_maxima_count": n_left,
+        "right_reference_maxima_count": n_right,
+        "left_candidate_repetition_durations_s": (
+            [round(float(d), 4) for d in left_durations]
+            if left_durations is not None
             else None
         ),
+        "right_candidate_repetition_durations_s": (
+            [round(float(d), 4) for d in right_durations]
+            if right_durations is not None
+            else None
+        ),
+        "bilateral_pairing_status": "deferred",
     }
 
 
@@ -262,6 +366,26 @@ def _round_optional(value: Optional[float], digits: int = 4) -> Optional[float]:
 
 
 # ── Structured session export (Phase I) ───────────────────────────────────────
+
+def _validate_no_forbidden_keys(obj: Any, path: str = "") -> None:
+    """Recursively reject forbidden KEYS (data-safety, structural, not String).
+
+    Raises ``ValueError`` on the first forbidden key. Values are not
+    substring-scanned, so benign scientific text (e.g. "landmark name") is
+    unaffected. Unlike ``assert``, this executes regardless of ``-O``.
+    """
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            key_name = str(key)
+            if key_name in FORBIDDEN_EXPORT_KEYS:
+                raise ValueError(
+                    f"forbidden key {key_name!r} at {path or '<root>'}"
+                )
+            _validate_no_forbidden_keys(value, f"{path}.{key_name}")
+    elif isinstance(obj, (list, tuple)):
+        for index, item in enumerate(obj):
+            _validate_no_forbidden_keys(item, f"{path}[{index}]")
+
 
 def build_session_export(
     *,
@@ -276,8 +400,10 @@ def build_session_export(
 ) -> dict:
     """Versioned research-session export object (no secrets, no PII).
 
-    ``frames`` accepts the list of FrameEvidence dicts; pass already-sliced
-    frames (or rely on the accumulator window) to bound the output size.
+    ``source`` must NOT carry local/absolute input paths (see
+    ``analyze_video.py`` which writes ``source_type``/``fps`` metadata
+    instead). Forbidden keys are rejected structurally via
+    :func:`_validate_no_forbidden_keys`.
     """
     export: dict[str, Any] = {
         "schema_version": SESSION_SCHEMA_VERSION,
@@ -291,9 +417,5 @@ def build_session_export(
         "kimore_reference_analysis": dict(kimore_reference_analysis),
         "limitations": list(limitations),
     }
-    # Guard against accidental PII placeholders in exports.
-    for forbidden in ("patient", "name", "subject_id"):
-        assert forbidden not in str(export).lower(), (
-            f"sensitive field {forbidden!r} guard triggered in session export"
-        )
+    _validate_no_forbidden_keys(export)
     return export
