@@ -45,6 +45,20 @@ POSE_MIN_DETECTION_CONFIDENCE = 0.5
 POSE_MIN_TRACKING_CONFIDENCE = 0.5
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# ENGINEERING RUNTIME SETTINGS — NOT CLINICAL THRESHOLDS
+# ══════════════════════════════════════════════════════════════════════════════
+# These control camera reliability, reconnect/backoff, and timing.
+# They do NOT affect risk scoring or biomechanical calculations.
+# ══════════════════════════════════════════════════════════════════════════════
+READ_FAILURE_RECONNECT_THRESHOLD = 10      # consecutive failed reads before reconnect
+RECONNECT_MAX_ATTEMPTS = 5                 # bounded reconnect attempts per stretch
+RECONNECT_BASE_DELAY_SECONDS = 0.2         # initial backoff delay
+RECONNECT_MAX_DELAY_SECONDS = 2.0          # backoff ceiling
+READ_RETRY_PAUSE_SECONDS = 0.05            # pause between simple read retries
+RECONNECT_PAUSE_RESET_SECONDS = 1.0        # pause after attempts exhausted before reset
+
+
 def get_camera_source():
     """Return the configured camera source, allowing a simple env override."""
     raw_source = os.getenv(CAMERA_SOURCE_ENV, CAMERA_SOURCE)

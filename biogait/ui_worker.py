@@ -2,10 +2,16 @@
 
 Uses mediapipe.tasks (0.10+) PoseLandmarker API.
 Model file: pose_landmarker_lite.task  (downloaded automatically if absent)
+
+Engineering notes (M1):
+- MediaPipe VIDEO timestamps and timing use a monotonic clock.
+- Read failures trigger a bounded NO_SIGNAL -> RECONNECTING cycle.
+- Resources are released deterministically (try/finally + context manager).
+- Emitted QImage is detached (copy) so it owns its pixel memory.
+- Status signals are emitted only on meaningful changes.
 """
 from __future__ import annotations
 
-import time
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -19,6 +25,13 @@ from PyQt5.QtGui import QImage
 
 import config
 from metrics import add_session_fields, calculate_pose_metrics, no_pose_metrics
+from runtime_utils import (
+    MonotonicClock,
+    ReconnectPolicy,
+    StatusGuard,
+    interruptible_sleep,
+    open_camera,
+)
 
 # ── Skeleton drawing constants ────────────────────────────────────────────────
 # Landmark indices that we care about (PoseLandmark enum values)
@@ -101,6 +114,20 @@ def _draw_skeleton(rgb: Any, pose_result) -> None:
             cv2.circle(rgb, pt(idx), 5, (0, 180, 80),    1,  cv2.LINE_AA)
 
 
+def _build_landmarker(model_path: str):
+    """Build a VIDEO-mode PoseLandmarker with the project's current settings."""
+    base_opts = mp_python.BaseOptions(model_asset_path=model_path)
+    opts = mp_vision.PoseLandmarkerOptions(
+        base_options=base_opts,
+        running_mode=mp_vision.RunningMode.VIDEO,
+        num_poses=1,
+        min_pose_detection_confidence=config.POSE_MIN_DETECTION_CONFIDENCE,
+        min_pose_presence_confidence=0.5,
+        min_tracking_confidence=config.POSE_MIN_TRACKING_CONFIDENCE,
+    )
+    return mp_vision.PoseLandmarker.create_from_options(opts)
+
+
 # ── Worker ────────────────────────────────────────────────────────────────────
 
 class CameraWorker(QObject):
@@ -112,75 +139,134 @@ class CameraWorker(QObject):
         super().__init__()
         self._source   = camera_source
         self._running  = False
-        self._session  = time.time()
         self._frame_i  = 0
         self._last_mts = 0.0
 
     def run(self) -> None:
         self._running = True
-        self.status_ready.emit("CONNECTING")
+        status = StatusGuard()
+        clock = MonotonicClock()
 
-        model_path = _ensure_model()
+        def emit_status(new_status: str) -> None:
+            if status.update(new_status):
+                self.status_ready.emit(new_status)
 
-        base_opts = mp_python.BaseOptions(model_asset_path=model_path)
-        opts = mp_vision.PoseLandmarkerOptions(
-            base_options=base_opts,
-            running_mode=mp_vision.RunningMode.VIDEO,
-            num_poses=1,
-            min_pose_detection_confidence=0.5,
-            min_pose_presence_confidence=0.5,
-            min_tracking_confidence=0.5,
+        emit_status("CONNECTING")
+
+        cap = None
+        try:
+            model_path = _ensure_model()
+            landmarker = _build_landmarker(model_path)
+
+            with landmarker:
+                cap = open_camera(self._source)
+                if cap is None:
+                    print("[BioGait] ERROR: camera could not be opened")
+                    emit_status("ERROR")
+                    return
+
+                try:
+                    self._stream_loop(cap, landmarker, clock, emit_status)
+                finally:
+                    cap.release()
+                    cap = None
+        except Exception as exc:
+            print(f"[BioGait] ERROR: {type(exc).__name__}: {exc}")
+            emit_status("ERROR")
+        finally:
+            if cap is not None:
+                cap.release()
+            self._running = False
+            emit_status("STOPPED")
+
+    def _stream_loop(self, cap, landmarker, clock, emit_status) -> None:
+        reconnect = ReconnectPolicy(
+            failure_threshold=config.READ_FAILURE_RECONNECT_THRESHOLD,
+            max_reconnect_attempts=config.RECONNECT_MAX_ATTEMPTS,
+            base_delay=config.RECONNECT_BASE_DELAY_SECONDS,
+            max_delay=config.RECONNECT_MAX_DELAY_SECONDS,
         )
 
-        cap = cv2.VideoCapture(self._source)
-        if not cap.isOpened():
-            self.status_ready.emit("ERROR")
-            return
+        self._frame_i = 0
+        self._last_mts = 0.0
 
-        with mp_vision.PoseLandmarker.create_from_options(opts) as landmarker:
-            while self._running:
-                ok, frame = cap.read()
-                if not ok:
-                    self.status_ready.emit("NO_SIGNAL")
-                    time.sleep(0.05)
-                    continue
+        while self._running:
+            ok, frame = cap.read()
+            if not ok:
+                cap = self._handle_read_failure(cap, reconnect, emit_status)
+                continue
 
-                self._frame_i += 1
-                if isinstance(self._source, int) and config.MIRROR_LAPTOP_WEBCAM:
-                    frame = cv2.flip(frame, 1)
+            reconnect.on_frame_ok()
+            self._frame_i += 1
 
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            if isinstance(self._source, int) and config.MIRROR_LAPTOP_WEBCAM:
+                frame = cv2.flip(frame, 1)
 
-                # Build mediapipe Image from frame bytes
-                mp_image = mp.Image(
-                    image_format=mp.ImageFormat.SRGB,
-                    data=rgb,
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+            # Build mediapipe Image from frame bytes
+            mp_image = mp.Image(
+                image_format=mp.ImageFormat.SRGB,
+                data=rgb,
+            )
+            ts_ms = clock.video_timestamp_ms()
+            result = landmarker.detect_for_video(mp_image, ts_ms)
+
+            if result.pose_landmarks:
+                _draw_skeleton(rgb, result)
+                lms     = _extract_landmarks(result)
+                metrics = calculate_pose_metrics(lms)
+                emit_status("TRACKING")
+            else:
+                metrics = no_pose_metrics()
+                emit_status("NO_POSE")
+
+            elapsed = clock.elapsed_seconds()
+            metrics = add_session_fields(metrics, self._frame_i, elapsed)
+
+            h, w, ch = rgb.shape
+            img = QImage(rgb.tobytes(), w, h, ch * w, QImage.Format_RGB888).copy()
+            self.frame_ready.emit(img)
+
+            now = clock.elapsed_seconds()
+            if now - self._last_mts >= config.LATEST_WRITE_INTERVAL_SECONDS:
+                self.metrics_ready.emit(metrics)
+                self._last_mts = now
+
+    def _handle_read_failure(self, cap, reconnect, emit_status):
+        """Bounded NO_SIGNAL -> RECONNECTING recovery for failed frame reads."""
+        if reconnect.on_frame_failed():
+            # Threshold reached: attempt a controlled reconnect.
+            if emit_status("RECONNECTING"):
+                print("[BioGait] WARN: repeated frame loss — attempting reconnect")
+            delay = reconnect.reconnect_delay()
+            if delay is None:
+                # Bounded attempts exhausted for this stretch; pause, then reset.
+                emit_status("NO_SIGNAL")
+                interruptible_sleep(
+                    config.RECONNECT_PAUSE_RESET_SECONDS, self._should_stop
                 )
-                ts_ms = int((time.time() - self._session) * 1000)
-                result = landmarker.detect_for_video(mp_image, ts_ms)
+                reconnect.reset_reconnect()
+                return cap
+            if not interruptible_sleep(delay, self._should_stop):
+                return cap
+            emit_status("CONNECTING")
+            new_cap = open_camera(self._source)
+            if new_cap is not None:
+                cap.release()
+                cap = new_cap
+                emit_status("TRACKING")
+            else:
+                print("[BioGait] WARN: reconnect failed to reopen camera")
+                emit_status("NO_SIGNAL")
+            return cap
 
-                if result.pose_landmarks:
-                    _draw_skeleton(rgb, result)
-                    lms     = _extract_landmarks(result)
-                    metrics = calculate_pose_metrics(lms)
-                    self.status_ready.emit("TRACKING")
-                else:
-                    metrics = no_pose_metrics()
-                    self.status_ready.emit("NO_POSE")
+        emit_status("NO_SIGNAL")
+        interruptible_sleep(config.READ_RETRY_PAUSE_SECONDS, self._should_stop)
+        return cap
 
-                elapsed = time.time() - self._session
-                metrics = add_session_fields(metrics, self._frame_i, elapsed)
-
-                h, w, ch = rgb.shape
-                img = QImage(rgb.tobytes(), w, h, ch * w, QImage.Format_RGB888)
-                self.frame_ready.emit(img)
-
-                now = time.time()
-                if now - self._last_mts >= 0.25:
-                    self.metrics_ready.emit(metrics)
-                    self._last_mts = now
-
-        cap.release()
+    def _should_stop(self) -> bool:
+        return not self._running
 
     def stop(self) -> None:
         self._running = False
