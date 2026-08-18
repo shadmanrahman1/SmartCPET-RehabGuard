@@ -29,11 +29,13 @@ RISK_COLORS = {
 }
 
 STATUS_COLORS = {
-    "TRACKING":   "#2ea043",
-    "NO_POSE":    "#d29922",
-    "CONNECTING": "#8b949e",
-    "NO_SIGNAL":  "#f85149",
-    "ERROR":      "#f85149",
+    "TRACKING":    "#2ea043",
+    "NO_POSE":     "#d29922",
+    "CONNECTING":  "#8b949e",
+    "NO_SIGNAL":   "#f85149",
+    "RECONNECTING": "#d29922",
+    "ERROR":       "#f85149",
+    "STOPPED":     "#8b949e",
 }
 
 
