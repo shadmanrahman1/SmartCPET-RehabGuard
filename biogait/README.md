@@ -1,144 +1,105 @@
-# SmartCPET-RehabGuard BioGait Camera Prototype
+# SmartCPET-RehabGuard BioGait
 
-This is a camera-only MediaPipe demo for the BioGait module. It uses a laptop webcam or mobile IP camera stream, detects body landmarks, calculates simple biomechanical indicators, and writes live metrics for a Streamlit dashboard.
+Real-time RGB camera-based movement analysis prototype using MediaPipe pose estimation.
 
-The output is a screening score only. It is not a clinical diagnosis.
+> **Screening / decision-support architecture — not a clinical diagnostic device.**
+> The current risk scoring is a legacy rule-based experimental screening baseline and is not clinically validated.
 
-## Files
+## Runtime Architecture
 
-- `app.py` - OpenCV and MediaPipe live camera loop
-- `metrics.py` - angle, asymmetry, and risk-score calculations
-- `pose_utils.py` - landmark extraction and video overlay helpers
-- `config.py` - camera source, thresholds, and output paths
-- `dashboard.py` - Streamlit dashboard reading `latest_metrics.json`
-- `outputs/session_metrics.csv` - session metrics log
-- `outputs/screenshots/` - screenshots saved from the camera app
+### Primary Runtime (Qt Desktop)
 
-## Setup on Windows
+```
+app_qt.py
+    ↓
+ui_worker.py  (QThread: camera + MediaPipe Tasks PoseLandmarker)
+    ↓
+metrics.py    (biomechanical calculations + risk scoring)
+    ↓
+PyQt5 dashboard (VideoPanel + DashboardPanel + Sparklines)
+```
 
-From this folder, Python 3.10 is recommended for the smoothest MediaPipe install:
+This is the conference-primary entry point:
 
 ```powershell
-py -3.10 -m venv venv
-.\venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-pip install -r requirements.txt
+python app_qt.py
 ```
 
-If PowerShell blocks venv activation, open Command Prompt and run:
+### Legacy Runtime (OpenCV Window + File Logging)
 
-```cmd
-venv\Scripts\activate.bat
-```
+`app.py` is the legacy OpenCV implementation. It writes metrics to `latest_metrics.json` and `outputs/session_metrics.csv`.
 
-If the `py -3.10` launcher is not available, install Python 3.10 or 3.11 and create the venv with that version.
-
-## Run with the laptop webcam
-
-In `config.py`, keep:
-
-```python
-CAMERA_SOURCE = 0
-```
-
-Then run:
+`dashboard.py` is a Streamlit companion that **reads `latest_metrics.json` produced by `app.py`**. It is NOT currently fed by `app_qt.py`. These two runtimes are not synchronized.
 
 ```powershell
+# Legacy only:
 python app.py
-```
 
-Keyboard controls:
-
-- `q` - quit
-- `s` - save screenshot
-- `r` - reset session CSV
-
-## Run with a mobile IP camera
-
-Connect the phone and laptop to the same Wi-Fi. Start an Android IP camera app such as IP Webcam, DroidCam, Iriun, Camo, or OBS DroidCam.
-
-For IP Webcam, the stream is usually:
-
-```text
-http://PHONE_IP:8080/video
-```
-
-Set it in `config.py`:
-
-```python
-CAMERA_SOURCE = "http://192.168.0.105:8080/video"
-```
-
-Or use a temporary PowerShell override:
-
-```powershell
-$env:BIOGAIT_CAMERA_SOURCE="http://192.168.0.105:8080/video"
-python app.py
-```
-
-## Run the dashboard
-
-Keep `app.py` running in one terminal. Open another terminal:
-
-```powershell
+# In a separate terminal, for the legacy Streamlit view:
 streamlit run dashboard.py
 ```
 
-Open:
+## Files
 
-```text
-http://localhost:8501
-```
+| File | Role |
+|------|------|
+| `app_qt.py` | **Primary** — PyQt5 desktop application |
+| `ui_worker.py` | Camera + MediaPipe worker (QThread) |
+| `ui_widgets.py` | PyQt5 reusable UI widgets |
+| `app.py` | **Legacy** — OpenCV window + file logging |
+| `dashboard.py` | **Legacy** — Streamlit dashboard (reads app.py output) |
+| `metrics.py` | Biomechanical angle/risk calculations |
+| `pose_utils.py` | Landmark extraction + OpenCV drawing |
+| `config.py` | Camera source, thresholds, output paths |
+| `requirements.txt` | Python dependencies |
+| `pose_landmarker_lite.task` | MediaPipe PoseLandmarker model (pretrained) |
 
-To open the dashboard from a phone on the same Wi-Fi:
+## Setup
+
+Python 3.10 or 3.11 is recommended:
 
 ```powershell
-streamlit run dashboard.py --server.address 0.0.0.0
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+pip install -r requirements.txt
 ```
 
-Then browse from the phone to:
+## Camera Configuration
 
-```text
-http://LAPTOP_IP:8501
-```
+Default: laptop webcam (index 0).
 
-Find `LAPTOP_IP` with:
+To use a phone IP camera, set the environment variable:
 
 ```powershell
-ipconfig
+# PowerShell
+$env:BIOGAIT_CAMERA_SOURCE="http://PHONE_IP:8080/video"
+python app_qt.py
 ```
 
-## Demo placement
+```bash
+# Bash / Linux
+export BIOGAIT_CAMERA_SOURCE="http://PHONE_IP:8080/video"
+python app_qt.py
+```
 
-Start with a side view:
-
-- Camera distance: 2 to 3 meters
-- Camera height: waist to chest level
-- Full body visible
-- Good lighting
-
-Side view is best for knee angle and trunk lean. Front view is better for left-right posture and alignment demonstrations.
+See `.env.example` for available configuration variables.
 
 ## Metrics
 
 The prototype calculates:
 
-- left knee angle
-- right knee angle
-- trunk lean angle
-- knee angle asymmetry
-- hip height imbalance as a 2D camera-visible surrogate
-- ankle alignment difference as a 2D camera-visible surrogate
-- risk score from 0 to 100
-- risk level: LOW, MODERATE, or HIGH
-- reason list
+- Left / right knee angle (2D, degrees from landmark triplet)
+- Trunk lean angle (degrees from image vertical)
+- Knee angle asymmetry (absolute left-right difference)
+- Hip height imbalance (2D normalized surrogate)
+- Ankle alignment difference (2D normalized surrogate)
+- Risk score 0–100 (legacy rule-based heuristic)
+- Risk level: LOW / MODERATE / HIGH
 
-Rule-based score examples:
+These are **legacy rule-based experimental screening baselines**. They are not clinically validated and should not be used for medical decisions.
 
-- high knee angle asymmetry increases risk
-- high trunk lean increases risk
-- visible hip imbalance increases risk
-- visible ankle alignment difference increases risk
-- low landmark confidence adds a warning
+## Demo Placement
 
-This is intended for a prototype demo and should be validated clinically before any real medical use.
+- Side view: camera distance 2–3 m, waist to chest height, full body visible, good lighting
+- Side view is best for knee angle and trunk lean
+- Front view is better for left-right posture and alignment demonstrations

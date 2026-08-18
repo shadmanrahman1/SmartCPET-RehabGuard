@@ -1,7 +1,23 @@
-mediapipe
-opencv-python
-numpy
-pandas
-streamlit
-fastapi
-uvicorn
+# BioGait — Python Dependencies
+# Primary runtime: app_qt.py (PyQt5 desktop)
+# Legacy runtime: app.py (OpenCV + Streamlit dashboard)
+#
+# ── Version status ────────────────────────────────────────────────────────────
+# The compatibility ranges below are NOT verified-working pins. They are
+# reasonable lower-bound ranges selected for Python 3.10 / 3.11 compatibility,
+# based on import analysis + PyPI metadata.
+#
+# Exact reproducibility lock is pending a clean environment verification step.
+# Do not interpret these ranges as guaranteed-working pinned versions.
+
+# ── Core (both runtimes) ──────────────────────────────────────────────────────
+mediapipe>=0.10.9,<2.0
+opencv-python>=4.8,<6.0
+numpy>=1.24,<3.0
+
+# ── Primary runtime (Qt desktop) ──────────────────────────────────────────────
+PyQt5>=5.15,<6.0
+
+# ── Legacy runtime (file-logging + Streamlit) ─────────────────────────────────
+pandas>=2.0,<4.0
+streamlit>=1.30,<2.0
