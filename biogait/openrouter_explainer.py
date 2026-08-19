@@ -37,12 +37,14 @@ import time
 import urllib.error
 import urllib.request
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 from explanation_schema import (
     INPUT_SCHEMA_VERSION,
     build_input,
     contains_prohibited_claim,
     evidence_digest,
+    has_sensitive_fields,
     validate_output_shape,
 )
 from evidence_explainer import SAFETY_NOTE, template_explain
@@ -86,6 +88,18 @@ def _env_config(api_key=None, model=None, base_url=None):
     return mode, key, mdl, base
 
 
+def _is_openrouter_url(url: str) -> bool:
+    """True only for an https OpenRouter endpoint (OpenRouter-only provider)."""
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    if parsed.scheme != "https":
+        return False
+    host = (parsed.netloc or "").split(":")[0].lower()
+    return host == "openrouter.ai"
+
+
 class OpenRouterExplainer:
     """Bounded explainer: disabled / template / openrouter."""
 
@@ -103,7 +117,16 @@ class OpenRouterExplainer:
             self.mode = "template"
         self.api_key = key
         self.model = mdl
-        self.base_url = (base or DEFAULT_BASE_URL).rstrip("/")
+        # Provider enforcement: OpenRouter-only. The base URL must be the
+        # OpenRouter endpoint; arbitrary hosts are rejected.
+        base = (base or DEFAULT_BASE_URL).rstrip("/")
+        if not _is_openrouter_url(base):
+            # Do not allow evidence to be sent to an arbitrary host.
+            raise ValueError(
+                "base_url must be an https endpoint on host openrouter.ai "
+                "(OpenRouter is the only remote provider)"
+            )
+        self.base_url = base
         self.timeout = float(timeout)
         # Remote is only attempted when explicitly configured with a key+model.
         self._remote_ready = (
@@ -111,7 +134,11 @@ class OpenRouterExplainer:
             and bool(self.api_key)
             and bool(self.model)
         )
-        self._cache: dict[str, dict] = {}
+        # Remote cache stores enriched audit entries (output + provider + model
+        # metadata) ONLY for successful OpenRouter responses.
+        self._remote_cache: dict[str, dict] = {}
+        # Template mode may cache deterministically (outputs only).
+        self._template_cache: dict[str, dict] = {}
 
     def _user_message(self, evidence_input: dict) -> str:
         return USER_TEMPLATE.format(
@@ -171,62 +198,113 @@ class OpenRouterExplainer:
 
         return "OK", {"output": output, "returned_model": returned_model}
 
-    def explain(self, evidence: dict, force: bool = False) -> dict:
-        """Explain structured evidence; returns an explanation + audit dict."""
-        try:
-            evidence_input = build_input(evidence)
-            digest = evidence_digest(evidence_input)
-        except ValueError as exc:
-            return {
-                "explainer_mode": "template",
-                "provider": None,
-                "requested_model": None,
-                "returned_model": None,
-                "input_schema_version": INPUT_SCHEMA_VERSION,
-                "evidence_digest": None,
-                "timestamp": _now(),
-                "status": "INPUT_REJECTED",
-                "output": template_explain({"quality": {}}),
-                "note": f"explainer input rejected: {exc}",
-            }
-
-        output = template_explain(evidence_input)
-        status = "TEMPLATE"
-        provider = None
-        requested_model = None
-        returned_model = None
-
-        if not force and digest in self._cache:
-            output = self._cache[digest]
-            status = "CACHE_HIT"
-        elif self._remote_ready:
-            status_remote, remote_result = self._call_remote(evidence_input)
-            provider = "openrouter"
-            requested_model = self.model
-            if status_remote == "OK" and remote_result is not None:
-                output = remote_result["output"]
-                returned_model = remote_result.get("returned_model")
-                self._cache[digest] = output
-                status = "OK"
-            else:
-                # Fallback to deterministic template; keep neutral status.
-                status = status_remote
-                self._cache.setdefault(digest, template_explain(evidence_input))
-                output = template_explain(evidence_input)
-        else:
-            self._cache.setdefault(digest, output)
-
+    def _audit(self, *, digest, status, output, provider=None, requested=None, returned=None) -> dict:
         return {
             "explainer_mode": self.mode,
             "provider": provider,
-            "requested_model": requested_model,
-            "returned_model": returned_model,
+            "requested_model": requested,
+            "returned_model": returned,
             "input_schema_version": INPUT_SCHEMA_VERSION,
             "evidence_digest": digest,
             "timestamp": _now(),
             "status": status,
             "output": output,
         }
+
+    def explain(self, evidence: dict, force: bool = False) -> dict:
+        """Explain structured evidence; returns an explanation + audit dict.
+
+        Privacy boundary (recursive) is applied inside the boundary; if the input
+        contains ANY sensitive nested field, the remote provider is NEVER called
+        and a template fallback is returned (defense in depth). Failures (rate
+        limit, network, invalid response, model unavailable) fall back to the
+        template for THIS invocation and are NOT cached, so the next explicit
+        click can retry OpenRouter.
+        """
+        try:
+            if not isinstance(evidence, dict):
+                raise ValueError("explainer input must be a structured dict")
+            evidence_input = build_input(evidence)
+            digest = evidence_digest(evidence_input)
+            if has_sensitive_fields(evidence):
+                # Do not send any evidence to a provider when sensitive fields
+                # were present; deterministic template only.
+                return self._audit(
+                    digest=digest,
+                    status="INPUT_CONTAINS_SENSITIVE_NO_REMOTE",
+                    output=template_explain(evidence_input),
+                )
+        except ValueError as exc:
+            result = self._audit(
+                digest=None,
+                status="INPUT_REJECTED",
+                output=template_explain({"quality": {}}),
+            )
+            result["note"] = f"explainer input rejected: {exc}"
+            return result
+
+        # ── openrouter mode ────────────────────────────────────────────────
+        if self.mode == "openrouter":
+            if not (self.api_key and self.model):
+                # Clearly distinguish not-configured from an intentional template.
+                return self._audit(
+                    digest=digest,
+                    status="OPENROUTER_NOT_CONFIGURED",
+                    output=template_explain(evidence_input),
+                    provider="openrouter",
+                    requested=self.model,
+                )
+            entry = self._remote_cache.get(digest)
+            if not force and entry is not None:
+                return self._audit(
+                    digest=digest,
+                    status="CACHE_HIT",
+                    output=entry["output"],
+                    provider=entry.get("provider"),
+                    requested=entry.get("requested_model"),
+                    returned=entry.get("returned_model"),
+                )
+            status_remote, remote_result = self._call_remote(evidence_input)
+            if status_remote == "OK" and remote_result is not None:
+                output = remote_result["output"]
+                # BioGait owns the safety note; never trust the remote model.
+                output["safety_note"] = SAFETY_NOTE
+                returned = remote_result.get("returned_model")
+                self._remote_cache[digest] = {
+                    "provider": "openrouter",
+                    "requested_model": self.model,
+                    "returned_model": returned,
+                    "input_schema_version": INPUT_SCHEMA_VERSION,
+                    "evidence_digest": digest,
+                    "output": output,
+                }
+                return self._audit(
+                    digest=digest,
+                    status="OK",
+                    output=output,
+                    provider="openrouter",
+                    requested=self.model,
+                    returned=returned,
+                )
+            # Failure: do NOT cache; template fallback for this invocation.
+            return self._audit(
+                digest=digest,
+                status=status_remote,
+                output=template_explain(evidence_input),
+                provider="openrouter",
+                requested=self.model,
+            )
+
+        # ── disabled / template mode ──────────────────────────────────────
+        cached = self._template_cache.get(digest)
+        if not force and cached is not None:
+            output = cached
+            status = "CACHE_HIT"
+        else:
+            output = template_explain(evidence_input)
+            self._template_cache[digest] = output
+            status = "DISABLED" if self.mode == "disabled" else "TEMPLATE"
+        return self._audit(digest=digest, status=status, output=output)
 
 
 def _now() -> str:

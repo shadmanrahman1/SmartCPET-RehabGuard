@@ -45,42 +45,79 @@ ALLOWED_INPUT_KEYS = {
 # Expected structured explanation output.
 OUTPUT_SCHEMA_KEYS = ("summary", "observations", "limitations", "safety_note")
 
-# Explicitly REJECTED fields even if nested (defense in depth).
-REJECTED_FIELD_HINTS = ("video", "camera", "image", "frame", "path", "url",
-                        "email", "ip", "key", "token", "secret", "password")
+# ── Recursive provider privacy boundary (items 1/28) ─────────────────────────
+# Explicit normalized names + careful bounded suffix checks (*_path, *_url), so
+# legitimate keys like frame_index / sequence_key / landmark are never rejected.
+FORBIDDEN_IDENTITY_KEYS = {
+    "patient", "patient_id", "patient_name",
+    "participant_id", "participant_name",
+    "subject_id", "subject_name",
+    "email",
+}
+
+FORBIDDEN_CREDENTIAL_KEYS = {
+    "api_key", "token", "secret", "password", "authorization",
+}
+
+FORBIDDEN_RAW_SOURCE_KEYS = {
+    "camera_url", "camera_source",
+    "video_path", "image_path", "file_path", "local_path", "absolute_path",
+    "raw_video", "raw_frame", "image_bytes", "frame_bytes",
+}
+
+REJECTED_SUFFIXES = ("_path", "_url")
 
 
-def reject_evidence_raw(*, evidence: Any) -> None:
-    """Raise ValueError if NON-whitelisted raw/identifying evidence fields exist.
+def _is_forbidden_nested_key(key: Any) -> bool:
+    name = str(key).strip().lower()
+    if name in FORBIDDEN_IDENTITY_KEYS:
+        return True
+    if name in FORBIDDEN_CREDENTIAL_KEYS:
+        return True
+    if name in FORBIDDEN_RAW_SOURCE_KEYS:
+        return True
+    return name.endswith(REJECTED_SUFFIXES)
 
-    Whitelisted schema keys (see ``ALLOWED_INPUT_KEYS``) are always allowed; the
-    scan targets other (non-whitelisted) fields whose names hint at raw video,
-    paths, identity, or credentials. This is a defensive guard before the
-    whitelist reduction in :func:`build_input`.
+
+def prune_sensitive_fields(obj: Any) -> Any:
+    """Recursively drop sensitive keys from nested dict/list structures.
+
+    Identity, credential, raw-source, and ``*_path`` / ``*_url`` keys are
+    removed at every nesting level so they can never reach a provider. Benign
+    keys (``frame_index``, ``sequence_key``, ``landmark``) are preserved.
     """
-    if not isinstance(evidence, dict):
-        raise ValueError("explainer input must be a structured dict")
-    for key in evidence:
-        if key in ALLOWED_INPUT_KEYS:
-            continue
-        hint = str(key).lower()
-        if any(h in hint for h in REJECTED_FIELD_HINTS):
-            raise ValueError(f"raw/identifying field not allowed for explanation: {key}")
+    if isinstance(obj, dict):
+        return {
+            key: prune_sensitive_fields(value)
+            for key, value in obj.items()
+            if not _is_forbidden_nested_key(key)
+        }
+    if isinstance(obj, (list, tuple)):
+        return [prune_sensitive_fields(item) for item in obj]
+    return obj
 
 
 def build_input(evidence: dict) -> dict:
-    """Return the whitelisted, non-identifying evidence for explanation.
+    """Return whitelisted, recursively privacy-pruned evidence for explanation.
 
-    Only keys in ``ALLOWED_INPUT_KEYS`` are kept; everything else (raw video,
-    paths, identity, credentials) is DROPPED so it can never reach a provider.
-    Strict rejection can be enforced explicitly via :func:`reject_evidence_raw`.
+    Only keys in ``ALLOWED_INPUT_KEYS`` survive the top-level whitelist, then
+    every nested dict/list is recursively pruned of identity/credential/
+    raw-path fields. This runs automatically inside the boundary, so a developer
+    never has to remember a separate validator. Sensitive keys are dropped
+    (never sent); they are treated as absent.
     """
     if not isinstance(evidence, dict):
         raise ValueError("explainer input must be a structured dict")
-    return {
+    top_level = {
         k: v for k, v in evidence.items()
         if k in ALLOWED_INPUT_KEYS and v is not None
     }
+    return prune_sensitive_fields(top_level)
+
+
+def has_sensitive_fields(evidence: dict) -> bool:
+    """True if the (whitelisted) evidence still contains a sensitive nested key."""
+    return prune_sensitive_fields(evidence) != evidence
 
 
 def canonical_json(evidence_input: dict) -> str:
@@ -126,6 +163,12 @@ PROHIBITED_CLAIM_PATTERNS = [
     re.compile(r"\brehabilitation\s+(?:is|was)\s+successful", re.IGNORECASE),
     re.compile(r"\bscore\s+of\s+\d", re.IGNORECASE),
     re.compile(r"\bclinically\s+reliab", re.IGNORECASE),
+    # Direct movement/exercise judgements + rehabilitation performance claims.
+    re.compile(r"\bmovement\s+is\s+(?:correct|incorrect|normal|abnormal|good|bad)\b", re.IGNORECASE),
+    re.compile(r"\b(?:exercise|squat)\s+is\s+(?:correct|incorrect|normal|abnormal|good|bad)\b", re.IGNORECASE),
+    re.compile(r"\b(?:good|bad)\s+rehabilitation\s+performance\b", re.IGNORECASE),
+    re.compile(r"\bclinical\s+improvement\b", re.IGNORECASE),
+    re.compile(r"\bquality\s+of\s+\d+\s*/\s*10\b", re.IGNORECASE),
 ]
 
 
