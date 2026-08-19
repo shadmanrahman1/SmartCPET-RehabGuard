@@ -9,7 +9,7 @@ from PyQt5.QtGui import (
     QBrush, QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen
 )
 from PyQt5.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QProgressBar, QSizePolicy,
+    QFrame, QHBoxLayout, QLabel, QProgressBar, QPushButton, QSizePolicy,
     QVBoxLayout, QWidget
 )
 
@@ -237,6 +237,10 @@ class ResearchEvidencePanel(QFrame):
     semantics. Keep this panel information-neutral.
     """
 
+    # Emitted when the user presses "Generate Evidence Summary". A bounded
+    # explainer is run asynchronously OFF the capture thread.
+    generate_summary_requested = pyqtSignal()
+
     def __init__(self) -> None:
         super().__init__()
         self.setStyleSheet(f"""
@@ -269,6 +273,9 @@ class ResearchEvidencePanel(QFrame):
             ("Rolling PO availability", ""),
             ("Rolling L ROM", "°"),
             ("Rolling R ROM", "°"),
+            ("Session state", ""),
+            ("Processed frames", ""),
+            ("Research elapsed", "s"),
         ]
         for label, unit in row_specs:
             self._units[label] = unit
@@ -285,6 +292,40 @@ class ResearchEvidencePanel(QFrame):
             grid.addWidget(val)
             self._rows[label] = val
             lay.addLayout(grid)
+
+        # Causal-filter observability status (default disabled).
+        self._causal_status_label = QLabel("Causal filter: disabled")
+        self._causal_status_label.setStyleSheet(f"color:{TEXT_SEC}; font-size:9px;")
+        lay.addWidget(self._causal_status_label)
+
+        # ── Evidence Summary (bounded explanation) ─────────────────────────
+        lay.addSpacing(4)
+        sum_hdr = QLabel("Evidence Summary")
+        sum_hdr.setStyleSheet(
+            f"color:{TEXT_SEC}; font-size:10px; font-weight:700; letter-spacing:1px;"
+        )
+        lay.addWidget(sum_hdr)
+        self._summary_label = QLabel(
+            "No summary yet. Press 'Generate Evidence Summary'."
+        )
+        self._summary_label.setWordWrap(True)
+        self._summary_label.setStyleSheet(f"color:{TEXT_PRI}; font-size:9px;")
+        lay.addWidget(self._summary_label)
+        gen_btn = QPushButton("Generate Evidence Summary")
+        gen_btn.setStyleSheet(
+            f"QPushButton {{ background:{TEXT_SEC}; color:{BG_CARD}; "
+            f"border:none; padding:6px 10px; border-radius:6px; }}"
+        )
+        gen_btn.clicked.connect(self.generate_summary_requested.emit)
+        gen_btn.setEnabled(True)
+        self._gen_button = gen_btn
+        lay.addWidget(gen_btn)
+
+    def set_evidence_summary(self, text: str) -> None:
+        self._summary_label.setText(text or "No summary available.")
+
+    def set_generate_enabled(self, enabled: bool) -> None:
+        self._gen_button.setEnabled(enabled)
 
     def update_research_evidence(self, payload: dict) -> None:
         def _fmt(name: str, value, digits: int = 1) -> str:
@@ -325,3 +366,21 @@ class ResearchEvidencePanel(QFrame):
         self._rows["Rolling R ROM"].setText(
             _fmt("Rolling R ROM", payload.get("rolling_right_knee_rom_deg"))
         )
+
+        # Information-neutral session state / progress.
+        self._rows["Session state"].setText(
+            str(payload.get("session_state") or "IDLE")
+        )
+        frames = payload.get("processed_frames")
+        self._rows["Processed frames"].setText(str(frames) if frames is not None else "--")
+        self._rows["Research elapsed"].setText(
+            _fmt("Research elapsed", payload.get("research_elapsed_seconds"))
+        )
+
+        # Optional causal-filter observability (raw values are never replaced).
+        if "causal_filter_status" in payload:
+            causal_status = payload.get("causal_filter_status")
+            if self._causal_status_label is not None:
+                self._causal_status_label.setText(
+                    f"Causal filter: {causal_status}" if causal_status else "Causal filter: disabled"
+                )

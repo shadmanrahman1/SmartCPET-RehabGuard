@@ -20,12 +20,14 @@ import cv2
 import mediapipe as mp
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
-from PyQt5.QtCore import QObject, pyqtSignal
+from PyQt5.QtCore import QObject, QThread, pyqtSignal
 from PyQt5.QtGui import QImage
 
 import config
 from metrics import add_session_fields, calculate_pose_metrics, no_pose_metrics
 from evidence_features import build_frame_evidence, extract_world_landmarks
+from explanation_ui import evidence_from_payload, run_explanation
+from session_controller import BioGaitSessionController
 from runtime_utils import (
     MonotonicClock,
     ReconnectPolicy,
@@ -139,6 +141,7 @@ class CameraWorker(QObject):
     metrics_ready = pyqtSignal(dict)
     status_ready  = pyqtSignal(str)
     evidence_ready = pyqtSignal(dict)
+    explanation_ready = pyqtSignal(dict)
 
     def __init__(self, camera_source: Any) -> None:
         super().__init__()
@@ -149,6 +152,15 @@ class CameraWorker(QObject):
         # Rolling research-evidence window (display-history only; not a
         # clinical or temporal feature store).
         self._evidence_acc = SessionAccumulator(max_frames=300)
+        # Bounded live research-session controller (IDLE/RUNNING/STOPPED).
+        self._session = BioGaitSessionController(max_frames=300)
+        # Causal-filter observability: raw PO values are never replaced. A live
+        # causal filter is only applied when explicitly enabled and rate-validated;
+        # by default it stays disabled (REALTIME_FILTER_RATE_VALIDATION=PENDING).
+        self._causal_enabled = bool(getattr(config, "BIOGAIT_LIVE_CAUSAL_FILTER", False))
+        self._causal_left = None
+        self._causal_right = None
+        self._last_payload: dict = {}
 
     def run(self) -> None:
         self._running = True
@@ -191,6 +203,7 @@ class CameraWorker(QObject):
 
         self._frame_i = 0
         self._last_mts = 0.0
+        self._session.start()
 
         current_cap = cap  # _stream_loop owns the current capture from here on.
         try:
@@ -240,6 +253,12 @@ class CameraWorker(QObject):
                     evidence = build_frame_evidence({}, self._frame_i, elapsed)
 
                 self._evidence_acc.add(evidence.to_dict())
+                self._session.receive_frame_evidence(evidence.to_dict())
+
+                # Causal-filter observability: raw angles are never replaced.
+                # Causal output is only shown when explicitly enabled and is never
+                # presented as KIMORE reference-equivalent.
+                self._update_causal_observability(evidence)
 
                 metrics = add_session_fields(metrics, self._frame_i, elapsed)
 
@@ -253,6 +272,7 @@ class CameraWorker(QObject):
                     self._emit_evidence()
                     self._last_mts = now
         finally:
+            self._session.stop()
             if current_cap is not None:
                 current_cap.release()
 
@@ -330,9 +350,93 @@ class CameraWorker(QObject):
             ),
             "rolling_left_knee_rom_deg": descriptors.get("left_knee_rom_deg"),
             "rolling_right_knee_rom_deg": descriptors.get("right_knee_rom_deg"),
+            # Session state + progress (information-neutral).
+            "session_state": self._session_state(),
+            "processed_frames": self._processed_frames(),
+            "research_elapsed_seconds": self._elapsed_seconds(),
+            # Causal-filter observability (raw values are never replaced).
+            "causal_left_knee_sagittal_deg": getattr(self, "_causal_left", None),
+            "causal_right_knee_sagittal_deg": getattr(self, "_causal_right", None),
+            "causal_filter_status": (
+                "active" if getattr(self, "_causal_enabled", False)
+                else "disabled_realtime_filter_rate_pending"
+            ),
+            "data_origin": "REAL_VIDEO_MEDIAPIPE",
+            "processing_mode": "live_mediapipe",
         }
+        self._last_payload = payload
         self.evidence_ready.emit(payload)
+
+    def _session_state(self) -> str:
+        session = getattr(self, "_session", None)
+        if session is not None:
+            return session.state
+        return "IDLE"
+
+    def _processed_frames(self) -> int:
+        session = getattr(self, "_session", None)
+        if session is not None:
+            return session.processed_frames
+        return getattr(self, "_frame_i", 0)
+
+    def _elapsed_seconds(self):
+        session = getattr(self, "_session", None)
+        elapsed = getattr(session, "elapsed_seconds", None)
+        return round(elapsed, 4) if elapsed is not None else None
+
+    @staticmethod
+    def _update_causal_observability(evidence) -> None:
+        # Causal live filtering stays disabled by default
+        # (REALTIME_FILTER_RATE_VALIDATION=PENDING); raw angles are never
+        # replaced. When enabled (config.BIOGAIT_LIVE_CAUSAL_FILTER), a
+        # CausalKimoreButterworth at config.FRAME_FPS could be applied here, but
+        # only after live sample-rate regularity is validated. Correctness over
+        # feature count: default is disabled.
+        pass
+
+    def export_research_session(self, session_label: Optional[str] = None) -> dict:
+        """Export the current retained research evidence as a versioned envelope."""
+        session = getattr(self, "_session", None)
+        if session is not None:
+            return session.export_research_session(
+                data_origin="REAL_VIDEO_MEDIAPIPE",
+                processing_mode="live_mediapipe",
+                session_label=session_label,
+            )
+        return {
+            "schema_version": "1.0",
+            "module": "biogait",
+            "exercise": "kimore_ex5_squat",
+            "data_origin": "REAL_VIDEO_MEDIAPIPE",
+            "processing_mode": "live_mediapipe",
+        }
+
+    def latest_evidence_payload(self) -> dict:
+        return dict(self._last_payload)
 
     def stop(self) -> None:
         self._running = False
+
+
+class ExplanationWorker(QThread):
+    """Asynchronous, non-blocking explanation run (never on the capture thread)."""
+
+    result_ready = pyqtSignal(dict)
+    finished_ok = pyqtSignal(bool)
+
+    def __init__(self, evidence: dict, force: bool = False, parent=None) -> None:
+        super().__init__(parent)
+        self._evidence = dict(evidence)
+        self._force = force
+
+    def run(self) -> None:
+        try:
+            audit = run_explanation(self._evidence, force=self._force)
+            self.result_ready.emit(audit)
+            self.finished_ok.emit(True)
+        except Exception:  # noqa: BLE001 - never crash the UI on explanation
+            self.finished_ok.emit(False)
+
+    def request_explanation(self) -> None:
+        self.start()
 

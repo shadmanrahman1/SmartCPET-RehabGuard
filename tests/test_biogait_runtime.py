@@ -379,6 +379,7 @@ def _install_ui_worker_stubs():
     real hardware, model download, or GUI display is involved."""
     qt_core = _types.ModuleType("PyQt5.QtCore")
     qt_core.QObject = type("QObjectStub", (), {})
+    qt_core.QThread = type("QThreadStub", (), {})
     qt_core.pyqtSignal = lambda *a, **k: mock.MagicMock()
     qt_gui = _types.ModuleType("PyQt5.QtGui")
     qt_gui.QImage = mock.MagicMock()

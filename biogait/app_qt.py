@@ -23,7 +23,8 @@ from ui_widgets import (
     STATUS_COLORS, TEXT_PRI, TEXT_SEC,
     MetricCard, ReasonsBox, ResearchEvidencePanel, RiskGauge, SparklineChart,
 )
-from ui_worker import CameraWorker
+from ui_worker import CameraWorker, ExplanationWorker
+from explanation_ui import evidence_from_payload
 
 
 # ── Video Panel ───────────────────────────────────────────────────────────────
@@ -238,8 +239,41 @@ class MainWindow(QMainWindow):
         self._worker.metrics_ready.connect(self._dashboard.update_metrics)
         self._worker.status_ready.connect(self._video.update_status)
         self._worker.evidence_ready.connect(self._dashboard.update_research_evidence)
+        self._worker.explanation_ready.connect(self._dashboard._research.set_evidence_summary)
+        self._dashboard._research.generate_summary_requested.connect(
+            self._generate_evidence_summary
+        )
 
         self._thread.start()
+
+    def _generate_evidence_summary(self) -> None:
+        """Run a bounded explanation asynchronously OFF the capture thread.
+
+        Uses only structured evidence (evidence_from_payload whitelist); never
+        raw frames or identity. Reuses the latest evidence payload. On result,
+        re-enables the button and shows the summary text.
+        """
+        panel = self._dashboard._research
+        evidence = evidence_from_payload(self._worker.latest_evidence_payload())
+        panel.set_generate_enabled(False)
+        panel.set_evidence_summary("Generating evidence summary...")
+
+        def _on_result(audit: dict) -> None:
+            output = audit.get("output") or {}
+            panel.set_evidence_summary(str(output.get("summary") or "No summary."))
+            panel.set_generate_enabled(True)
+            self._worker.explanation_ready.emit(audit)
+
+        def _on_finished(ok: bool) -> None:
+            if not ok:
+                panel.set_generate_enabled(True)
+                panel.set_evidence_summary("Explanation unavailable (template fallback).")
+
+        runner = ExplanationWorker(evidence)
+        runner.result_ready.connect(_on_result)
+        runner.finished_ok.connect(_on_finished)
+        self._explanation_thread = runner
+        runner.request_explanation()
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self._worker.stop()
