@@ -220,6 +220,79 @@ class TimestampValidationTests(unittest.TestCase):
         self.assertEqual(adapted["filtered_signal"], [])
 
 
+class MalformedTimestampTests(unittest.TestCase):
+    """B0.1: deterministic handling of malformed timestamps (never a crash)."""
+
+    def _run_both(self, timestamps, expect_warning_prefix):
+        stream = _periodic_knee_stream()
+        ref = kimore_reference_ex5_temporal_analysis(stream, timestamps=timestamps, fs=30.0)
+        self.assertTrue(
+            ref["warning"].startswith(expect_warning_prefix), ref["warning"]
+        )
+        self.assertEqual(ref["filtered_signal"], [])
+        adapted = kimore_adapted_ex5_temporal_analysis(stream, timestamps=timestamps, fs=30.0)
+        self.assertTrue(
+            adapted["warning"].startswith(expect_warning_prefix), adapted["warning"]
+        )
+        self.assertEqual(adapted["filtered_signal"], [])
+
+    def test_none_timestamp_element(self):
+        ts = _timestamps(600)
+        ts[4] = None
+        self._run_both(ts, "invalid_")
+
+    def test_nan_timestamp_element(self):
+        ts = _timestamps(600)
+        ts[4] = float("nan")
+        self._run_both(ts, "invalid_")
+
+    def test_inf_timestamp_element(self):
+        ts = _timestamps(600)
+        ts[4] = float("inf")
+        self._run_both(ts, "invalid_")
+
+    def test_minus_inf_timestamp_element(self):
+        ts = _timestamps(600)
+        ts[4] = float("-inf")
+        self._run_both(ts, "invalid_")
+
+    def test_non_numeric_string_timestamp_element(self):
+        ts = _timestamps(600)
+        ts[4] = "not-a-number"
+        self._run_both(ts, "invalid_")
+
+    def test_non_numeric_object_timestamp_element(self):
+        class Weird:
+            pass
+        ts = _timestamps(600)
+        ts[4] = Weird()
+        self._run_both(ts, "invalid_")
+
+    def test_validate_timestamps_rejects_malformed_directly(self):
+        for raw in (None, float("nan"), float("inf"), float("-inf"), "x", object()):
+            ok, issue = validate_timestamps([raw, 0.0, 0.1], 3, uniform_at=30.0)
+            self.assertFalse(ok)
+            self.assertIsNotNone(issue)
+
+
+class InvalidFsTests(unittest.TestCase):
+    """B0.1: supplied fs must be a finite positive rate."""
+
+    def test_reference_invalid_fs_warns(self):
+        stream = _periodic_knee_stream()
+        for bad in (0.0, -1.0, float("nan"), float("inf")):
+            ref = kimore_reference_ex5_temporal_analysis(stream, fs=bad)
+            self.assertEqual(ref["warning"], "invalid_reference_fs", bad)
+
+    def test_adapted_invalid_fs_warns(self):
+        stream = _periodic_knee_stream()
+        for bad in (0.0, -1.0, float("nan"), float("inf")):
+            adapted = kimore_adapted_ex5_temporal_analysis(stream, fs=bad)
+            self.assertEqual(adapted["warning"], "invalid_adapted_fs", bad)
+            self.assertEqual(adapted["classification"], "ENGINEERING_ADAPTED")
+            self.assertEqual(adapted["filtered_signal"], [])
+
+
 class PipelineTests(unittest.TestCase):
     def test_full_pipeline_finds_candidates(self):
         stream = _periodic_knee_stream()

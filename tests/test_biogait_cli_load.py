@@ -42,6 +42,16 @@ class _FakeCap:
         pass
 
 
+class _RawFpsCap:
+    """A capture whose FPS property returns an arbitrary raw value."""
+
+    def __init__(self, fps_value):
+        self._fps = fps_value
+
+    def get(self, _prop):
+        return self._fps
+
+
 def _install_cv2_stub():
     if "cv2" in sys.modules:
         return
@@ -141,6 +151,19 @@ class FpsResolutionTests(unittest.TestCase):
         # 0/NaN video FPS without override must not fall back to 30 silently.
         with self.assertRaises(ValueError):
             analyze_video._resolve_fps(float("nan"), False, None)
+
+    def test_rejects_non_finite_fps_override(self):
+        for bad in (float("nan"), float("inf"), float("-inf"), 0.0, -1.0):
+            with self.assertRaises(ValueError):
+                analyze_video._resolve_fps(0.0, False, bad)
+
+    def test_read_video_fps_rejects_non_finite_and_inf(self):
+        # B0.2: video FPS metadata NaN/+-inf must never be accepted as trusted.
+        for bad in (float("nan"), float("inf"), float("-inf"), 0.0, -1.0):
+            cap = _RawFpsCap(bad)
+            fps, trusted = analyze_video._read_video_fps(cap)
+            self.assertEqual(fps, 0.0)
+            self.assertFalse(trusted)
 
 
 class CliLoadTests(unittest.TestCase):

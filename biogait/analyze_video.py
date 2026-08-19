@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import sys
 import time
 import urllib.request
@@ -184,11 +185,14 @@ def _build_landmarker(model_path: str):
 
 
 def _read_video_fps(cap) -> tuple[float, bool]:
-    """Return (fps, trusted). fps=0.0 and trusted=False when metadata invalid."""
-    fps = float(cap.get(cv2.CAP_PROP_FPS))
-    if fps <= 0 or fps != fps:  # 0 / negative / NaN
+    """Return (fps, trusted). fps=0.0 and trusted=False when metadata invalid.
+
+    Uses ``math.isfinite`` so NaN/+-inf metadata is never accepted.
+    """
+    raw = float(cap.get(cv2.CAP_PROP_FPS))
+    if not math.isfinite(raw) or raw <= 0:
         return 0.0, False
-    return fps, True
+    return raw, True
 
 
 def _resolve_fps(video_fps: float, fps_from_video: bool, override: Optional[float]) -> float:
@@ -201,6 +205,11 @@ def _resolve_fps(video_fps: float, fps_from_video: bool, override: Optional[floa
     if fps_from_video:
         return float(video_fps)
     if override is not None:
+        if not math.isfinite(override) or override <= 0:
+            raise ValueError(
+                "invalid --fps override (must be a finite positive rate); "
+                "provide a valid value for scientific temporal analysis"
+            )
         return float(override)
     raise ValueError(
         "invalid or missing video FPS metadata; provide an explicit --fps "

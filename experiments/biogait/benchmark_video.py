@@ -56,60 +56,80 @@ def percentile_nearest_rank(sorted_values: list[float], percentile: float = 0.95
     return float(sorted_values[idx])
 
 
-def benchmark(input_path: Path, output_path: Optional[Path], fps_override: Optional[float]) -> dict[str, Any]:
-    mp = __import__("mediapipe")
-    model = _ensure_model()
-    landmarker = _build_landmarker(model)
+def _resolve_video_fps(cap, fps_override: Optional[float]) -> tuple[float, bool]:
+    """Resolve the analysis frame rate without silently assuming a value.
 
-    cap = cv2.VideoCapture(str(input_path))
-    if not cap.isOpened():
-        raise RuntimeError(f"could not open video: {input_path}")
+    Uses ``math.isfinite`` so NaN/+-inf metadata is never accepted. Returns
+    ``(fps, trusted_from_video)``. Raises ``ValueError`` when no finite
+    positive rate is available.
+    """
+    raw = float(cap.get(cv2.CAP_PROP_FPS))
+    if math.isfinite(raw) and raw > 0:
+        return raw, True
+    if fps_override is not None and math.isfinite(fps_override) and fps_override > 0:
+        return float(fps_override), False
+    raise ValueError(
+        "invalid or missing video FPS metadata; provide an explicit "
+        "--fps override for scientific temporal analysis"
+    )
 
-    fps = float(cap.get(cv2.CAP_PROP_FPS))
-    fps_from_video = fps > 0 and fps == fps
-    if not fps_from_video:
-        if fps_override is None:
-            cap.release()
-            raise ValueError(
-                "invalid or missing video FPS metadata; provide an explicit "
-                "--fps override"
-            )
-        fps = float(fps_override)
-        fps_from_video = False
-    timeline = SourceVideoTimeline(fps)
 
+def _close_landmarker(landmarker) -> None:
+    """Best-effort close of a PoseLandmarker (idempotent)."""
+    close = getattr(landmarker, "close", None)
+    if callable(close):
+        close()
+
+
+def _run_cycle(mp, cap, landmarker, timeline) -> tuple[float, int, int, int, list[float]]:
+    """Read the whole capture, measuring per-frame detect_for_video latency.
+
+    Returns ``(wall_s, total_frames, valid_pose_frames, world_available_frames,
+    per_frame_ms)``.
+    """
     total_frames = 0
     valid_pose_frames = 0
     world_available_frames = 0
     per_frame_ms: list[float] = []
     start = time.perf_counter()
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        t0 = time.perf_counter()
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        result = landmarker.detect_for_video(
+            img, timeline.video_timestamp_ms(total_frames)
+        )
+        t1 = time.perf_counter()
 
-    try:
-        with landmarker:
-            while True:
-                ok, frame = cap.read()
-                if not ok:
-                    break
-                t0 = time.perf_counter()
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-                result = landmarker.detect_for_video(
-                    img, timeline.video_timestamp_ms(total_frames)
-                )
-                t1 = time.perf_counter()
+        total_frames += 1
+        per_frame_ms.append((t1 - t0) * 1000.0)
 
-                total_frames += 1
-                per_frame_ms.append((t1 - t0) * 1000.0)
-
-                cond = getattr(result, "pose_landmarks", None)
-                if cond:
-                    valid_pose_frames += 1
-                    if getattr(result, "pose_world_landmarks", None):
-                        world_available_frames += 1
-    finally:
-        cap.release()
-
+        cond = getattr(result, "pose_landmarks", None)
+        if cond:
+            valid_pose_frames += 1
+            if getattr(result, "pose_world_landmarks", None):
+                world_available_frames += 1
     wall = time.perf_counter() - start
+    return wall, total_frames, valid_pose_frames, world_available_frames, per_frame_ms
+
+
+def _finalize_results(
+    *,
+    fps: float,
+    fps_from_video: bool,
+    frame_width_px: float,
+    frame_height_px: float,
+    wall: float,
+    total_frames: int,
+    valid_pose_frames: int,
+    world_available_frames: int,
+    per_frame_ms: list[float],
+    output_path: Optional[Path],
+) -> dict[str, Any]:
+    """Serialize benchmark results (measured values only; allow_nan=False)."""
     sorted_ms = sorted(per_frame_ms)
     results: dict[str, Any] = {
         "source_type": "local_video",
@@ -117,6 +137,8 @@ def benchmark(input_path: Path, output_path: Optional[Path], fps_override: Optio
         "video_fps_hz": (round(fps, 4) if fps_from_video else None),
         "fps_used_hz": round(fps, 4),
         "fps_trusted_from_video": fps_from_video,
+        "frame_width_px": frame_width_px,
+        "frame_height_px": frame_height_px,
         "total_frames": total_frames,
         "valid_pose_frames": valid_pose_frames,
         "world_landmark_available_frames": world_available_frames,
@@ -126,14 +148,19 @@ def benchmark(input_path: Path, output_path: Optional[Path], fps_override: Optio
             else None
         ),
         "processing_wall_seconds": round(wall, 4),
-        "mean_ms_per_frame": round(statistics.fmean(per_frame_ms), 4) if per_frame_ms else None,
-        "median_ms_per_frame": round(statistics.median(per_frame_ms), 4) if per_frame_ms else None,
+        "mean_ms_per_frame": (
+            round(statistics.fmean(per_frame_ms), 4) if per_frame_ms else None
+        ),
+        "median_ms_per_frame": (
+            round(statistics.median(per_frame_ms), 4) if per_frame_ms else None
+        ),
         "p95_ms_per_frame": (
             round(percentile_nearest_rank(sorted_ms), 4) if sorted_ms else None
         ),
-        "effective_throughput_fps": round(total_frames / wall, 4) if wall > 0 else None,
+        "effective_throughput_fps": (
+            round(total_frames / wall, 4) if wall > 0 else None
+        ),
     }
-
     print(json.dumps(results, indent=2, allow_nan=False))
     if output_path is not None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -142,6 +169,52 @@ def benchmark(input_path: Path, output_path: Optional[Path], fps_override: Optio
         )
         print(f"[benchmark_video] wrote {output_path}")
     return results
+
+
+def benchmark(input_path: Path, output_path: Optional[Path], fps_override: Optional[float]) -> dict[str, Any]:
+    mp = __import__("mediapipe")
+
+    # Resource lifecycle: the capture is owned by this function and released
+    # exactly once in the single outer finally. Video/FPS/timeline are
+    # validated BEFORE any model download, so an invalid input never triggers a
+    # network fetch. The PoseLandmarker, once created, is always closed.
+    cap = cv2.VideoCapture(str(input_path))
+    landmarker = None
+    try:
+        if not cap.isOpened():
+            raise RuntimeError(f"could not open video: {input_path}")
+
+        fps, fps_from_video = _resolve_video_fps(cap, fps_override)
+        timeline = SourceVideoTimeline(fps)  # raises on invalid fps
+
+        frame_width_px = float(cap.get(getattr(cv2, "CAP_PROP_FRAME_WIDTH", 3)))
+        frame_height_px = float(cap.get(getattr(cv2, "CAP_PROP_FRAME_HEIGHT", 4)))
+
+        model = _ensure_model()
+        landmarker = _build_landmarker(model)
+        try:
+            with landmarker:
+                wall, total_frames, valid_pose_frames, world_available_frames, per_frame_ms = (
+                    _run_cycle(mp, cap, landmarker, timeline)
+                )
+        finally:
+            _close_landmarker(landmarker)
+            landmarker = None
+    finally:
+        cap.release()
+
+    return _finalize_results(
+        fps=fps,
+        fps_from_video=fps_from_video,
+        frame_width_px=frame_width_px,
+        frame_height_px=frame_height_px,
+        wall=wall,
+        total_frames=total_frames,
+        valid_pose_frames=valid_pose_frames,
+        world_available_frames=world_available_frames,
+        per_frame_ms=per_frame_ms,
+        output_path=output_path,
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:

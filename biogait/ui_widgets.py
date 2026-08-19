@@ -303,10 +303,14 @@ class ResearchEvidencePanel(QFrame):
         )
 
         quality = payload.get("quality") or {}
-        available = payload.get("available", False) or quality.get("available", False)
-        self._rows["Current PO evidence"].setText(
-            "available" if available else "unavailable"
-        )
+        state = payload.get("current_po_state")
+        if not state:
+            left_ok = quality.get("left_po_available", False)
+            right_ok = quality.get("right_po_available", False)
+            state = "complete" if (left_ok and right_ok) else (
+                "partial" if (left_ok or right_ok) else "unavailable"
+            )
+        self._rows["Current PO evidence"].setText(state)
 
         rate = payload.get("rolling_po_availability_rate")
         self._rows["Rolling PO availability"].setText(
