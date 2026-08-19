@@ -21,19 +21,28 @@ _DEFAULT_STATUS = Path(__file__).resolve().parent / "results" / "evaluation_stat
 
 
 _COMPLETE_STRINGS = ("COMPLETE", "READY_FOR_EMPIRICAL_RESULTS")
+_CONTROLLED_FIELDS = ("status", "state", "result")
 
 
 def _status_complete(value: Any) -> bool:
     """True when a status value is COMPLETE-equivalent.
 
-    Strings are compared against a fixed complete set; dicts are considered
-    complete ONLY if they contain at least one nested COMPLETE-equivalent leaf
-    (an arbitrary dict never counts as complete by itself).
+    Strings are compared against a fixed complete set. A dict with a controlled
+    ``status/state/result`` field is evaluated by that field only. Otherwise a
+    compound status dict is COMPLETE only when it is non-empty AND every leaf is
+    COMPLETE-equivalent (a dict such as {"parse":"COMPLETE","evaluation":"PENDING"}
+    is NOT complete).
     """
     if isinstance(value, str):
         return value in _COMPLETE_STRINGS
     if isinstance(value, dict):
-        return any(_status_complete(v) for v in value.values())
+        for field in _CONTROLLED_FIELDS:
+            if field in value:
+                return _status_complete(value[field])
+        leaves = [v for v in value.values()]
+        if not leaves:
+            return False
+        return all(_status_complete(v) for v in leaves)
     return False
 
 
@@ -80,6 +89,7 @@ def check(status_path: Optional[Path] = None) -> dict[str, Any]:
         and _status_complete(real_video_smoke)
         and _status_complete(real_benchmark)
         and _status_complete(real_kimore)
+        and _status_complete(statuses.get("kimore_ex5_evaluation_real"))
     )
 
     if empirical_ready:

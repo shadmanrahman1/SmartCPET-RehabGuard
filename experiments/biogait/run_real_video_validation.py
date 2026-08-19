@@ -34,12 +34,13 @@ _PY = sys.executable
 
 
 def _inputs_map(output_dir: Path) -> str:
-    files = {}
-    for label, name in (("session", "session.json"), ("smoke", "smoke.json"),
-                        ("benchmark", "benchmark_batch.json")):
-        if (output_dir / name).exists():
-            files[label] = str(output_dir / name)
-    return json.dumps(files)
+    # Expected neutral result locations, independent of whether they exist at
+    # plan time. aggregate_results handles missing files and never persists paths.
+    return json.dumps({
+        "session": str(output_dir / "session.json"),
+        "smoke": str(output_dir / "smoke.json"),
+        "benchmark": str(output_dir / "benchmark_batch.json"),
+    })
 
 
 def plan_real_video(video: Path, output_dir: Path, fps: Optional[float]) -> list[dict]:
@@ -71,10 +72,11 @@ def plan_real_video(video: Path, output_dir: Path, fps: Optional[float]) -> list
                    EXPERIMENTS_DIR / "release_check.py",
                    "--evaluation-status", str(out / "evaluation_status.json")]
     return [
-        {"step": s[0], "script": Path(s[1]), "args": s[2:]} for s in
-        [_prep(*smoke_cmd), _prep(*build_cmd), _prep(*bench_cmd),
-         _prep(*aggregate_cmd), _prep(*paper_cmd), _prep(*figures_cmd),
-         _prep(*release_cmd)]
+        {"step": c[0], "phase": 1, "script": Path(c[1]), "args": c[2:]} for c in
+        (smoke_cmd, build_cmd, bench_cmd)
+    ] + [
+        {"step": c[0], "phase": 3, "script": Path(c[1]), "args": c[2:]} for c in
+        (aggregate_cmd, paper_cmd, figures_cmd, release_cmd)
     ]
 
 
@@ -94,10 +96,11 @@ def run_real_video(video: Path, output_dir: Path, fps: Optional[float], dry_run:
     output_dir.mkdir(parents=True, exist_ok=True)
     steps = plan_real_video(video, output_dir, fps)
     results = []
-    for step in steps:
+
+    def _run_step(step):
         if dry_run:
             results.append({"step": step["step"], "status": "DRY_RUN"})
-            continue
+            return
         cmd = [_PY, str(step["script"])] + [str(a) for a in step["args"]]
         try:
             subprocess.run(cmd, check=True, capture_output=True, text=True)
@@ -105,32 +108,39 @@ def run_real_video(video: Path, output_dir: Path, fps: Optional[float], dry_run:
         except Exception:  # noqa: BLE001 - record sanitized failure, continue
             results.append({"step": step["step"], "status": "failed", "error_type": "subprocess"})
 
+    # PHASE 1: real measurement steps (smoke, offline analyze, benchmark).
+    for step in [s for s in steps if s["phase"] == 1]:
+        _run_step(step)
+
+    # PHASE 2: read actual outputs and write the local evaluation status.
+    smoke_result = _read_json(output_dir / "smoke.json")
+    bench_result = _read_json(output_dir / "benchmark_batch.json")
+    smoke_ok = bool(not dry_run and smoke_result and smoke_result.get("REAL_RUNTIME_SMOKE") == "COMPLETE")
+    bench_ok = bool(not dry_run and bench_result and isinstance(bench_result, dict)
+                    and bench_result.get("summary", {}).get("REAL_VIDEO_BENCHMARK") == "COMPLETE")
+    local_status = _make_local_status(output_dir, smoke_ok, bench_ok, dry_run)
+    atomic_json_write(output_dir / "evaluation_status.json", local_status)
+
+    # PHASE 3: downstream tooling (runs only now that the status file exists).
+    for step in [s for s in steps if s["phase"] == 3]:
+        _run_step(step)
+
     ok_steps = [r for r in results if r["status"] == "ok"]
-    failed_steps = [r for r in results if r["status"] == "failed"]
+    failed_core = [r for r in results if r["status"] == "failed" and r["step"] in ("smoke", "offline_analyze", "benchmark")]
     if dry_run:
         overall = "DRY_RUN"
-    elif ok_steps and not failed_steps:
+    elif ok_steps and not failed_core and smoke_ok and bench_ok:
         overall = "COMPLETE"
+    elif smoke_ok or bench_ok or (failed_core and not ok_steps):
+        overall = "PARTIAL" if (smoke_ok or bench_ok) else "FAILED"
     elif ok_steps:
         overall = "PARTIAL"
     else:
         overall = "FAILED"
 
-    smoke_ok = False
-    bench_ok = False
-    smoke_result = _read_json(output_dir / "smoke.json")
-    bench_result = _read_json(output_dir / "benchmark_batch.json")
-    if not dry_run and smoke_result:
-        smoke_ok = smoke_result.get("REAL_RUNTIME_SMOKE") == "COMPLETE"
-    if not dry_run and bench_result and isinstance(bench_result, dict):
-        bench_ok = bench_result.get("summary", {}).get("REAL_VIDEO_BENCHMARK") == "COMPLETE"
     real_video_runtime = "COMPLETE" if (smoke_ok and bench_ok) else (
         "DRY_RUN" if dry_run else "PENDING"
     )
-
-    # Local evaluation-status refresh (never fabricated).
-    local_status = _make_local_status(output_dir, smoke_ok, bench_ok, dry_run)
-    atomic_json_write(output_dir / "evaluation_status.json", local_status)
 
     summary = {
         "orchestrator": "run_real_video_validation",

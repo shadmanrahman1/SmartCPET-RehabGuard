@@ -35,13 +35,15 @@ if str(BIOGAIT_DIR) not in sys.path:
 def resolve_smoke_fps(video_fps_value: float, trusted: bool, override: Optional[float]) -> tuple[Optional[float], str]:
     """Resolve the smoke-test frame rate without silently assuming 30 Hz.
 
-    Policy: valid video FPS -> use it; else explicit --fps -> use it; else
-    report PENDING (no detection loop). Returns ``(fps, status)`` where status
-    is "ok" or a reason label.
+    Policy: valid finite positive video FPS -> use it; else explicit finite
+    --fps -> use it; else report PENDING. Returns ``(fps, status)`` where
+    status is "ok" or a reason label.
     """
-    if trusted and video_fps_value and video_fps_value > 0:
+    import math
+
+    if trusted and video_fps_value is not None and math.isfinite(video_fps_value) and video_fps_value > 0:
         return float(video_fps_value), "ok"
-    if override is not None and override > 0:
+    if override is not None and math.isfinite(override) and override > 0:
         return float(override), "ok"
     return None, "fps_metadata_invalid_provide_--fps"
 
@@ -50,10 +52,12 @@ def smoke_video(input_path: Path, model_path: Optional[Path], max_frames: int = 
                 fps_override: Optional[float] = None) -> dict[str, Any]:
     """Process a bounded number of frames with the real MediaPipe model.
 
-    Uses the deterministic source-video timeline (strictly increasing VIDEO
-    timestamps and FrameEvidence ``timestamp_seconds``) resolved from real FPS
-    metadata or an explicit ``--fps`` override. It never silently assumes 30 Hz
-    and never uses wall-clock time as the offline video timeline.
+    Resource order: open capture -> verify capture -> read/resolve FPS ->
+    validate finite positive FPS -> create SourceVideoTimeline -> ONLY THEN
+    ensure/build the pose model -> process. Invalid video/FPS never triggers a
+    model download; the landmarker (once created) is always closed, and the
+    capture is always released. Uses strictly increasing VIDEO timestamps and
+    FrameEvidence ``timestamp_seconds`` (no wall-clock offline timeline).
     """
     try:
         import cv2
@@ -65,9 +69,8 @@ def smoke_video(input_path: Path, model_path: Optional[Path], max_frames: int = 
     from evidence_features import build_frame_evidence, extract_world_landmarks
     from runtime_utils import SourceVideoTimeline
 
-    model = str(model_path if model_path else Path(_ensure_model()))
-    landmarker = _build_landmarker(model)
     cap = cv2.VideoCapture(str(input_path))
+    landmarker = None
     try:
         if not cap.isOpened():
             return {"REAL_RUNTIME_SMOKE": "PENDING", "reason": "video could not be opened"}
@@ -76,45 +79,59 @@ def smoke_video(input_path: Path, model_path: Optional[Path], max_frames: int = 
         fps, fps_status = resolve_smoke_fps(video_fps, trusted, fps_override)
         if fps is None:
             return {"REAL_RUNTIME_SMOKE": "PENDING", "reason": fps_status}
-        timeline = SourceVideoTimeline(fps)
+        timeline = SourceVideoTimeline(fps)  # raises on invalid fps
 
-        frames = 0
-        pose_frames = 0
-        world_extracted = 0
-        serialized_ok = 0
-        start = time.perf_counter()
-        with landmarker:
-            for _ in range(max_frames):
-                ok, frame = cap.read()
-                if not ok:
-                    break
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-                # Strictly increasing VIDEO timestamp from the shared timeline.
-                ts_ms = timeline.video_timestamp_ms(frames)
-                result = landmarker.detect_for_video(mp_image, ts_ms)
-                frames += 1
-                if getattr(result, "pose_landmarks", None):
-                    pose_frames += 1
-                world = extract_world_landmarks(result)
-                if world:
-                    world_extracted += 1
-                timestamp_s = timeline.timestamp_seconds(frames - 1)
-                evidence = build_frame_evidence(world, frames - 1, timestamp_s)
-                json.dumps(evidence.to_dict(), allow_nan=False)
-                serialized_ok += 1
-        wall = time.perf_counter() - start
-        return {
-            "REAL_RUNTIME_SMOKE": "COMPLETE",
-            "fps_used_hz": round(fps, 4),
-            "frames_processed": frames,
-            "pose_frames": pose_frames,
-            "world_landmark_frames": world_extracted,
-            "evidence_serialized_ok": serialized_ok,
-            "processing_wall_seconds": round(wall, 4),
-        }
+        # Only now that the input is valid do we ensure/build the pose model.
+        model = str(model_path if model_path else Path(_ensure_model()))
+        landmarker = _build_landmarker(model)
+        try:
+            with landmarker:
+                frames = 0
+                pose_frames = 0
+                world_extracted = 0
+                serialized_ok = 0
+                start = time.perf_counter()
+                for _ in range(max_frames):
+                    ok, frame = cap.read()
+                    if not ok:
+                        break
+                    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+                    ts_ms = timeline.video_timestamp_ms(frames)
+                    result = landmarker.detect_for_video(mp_image, ts_ms)
+                    frames += 1
+                    if getattr(result, "pose_landmarks", None):
+                        pose_frames += 1
+                    world = extract_world_landmarks(result)
+                    if world:
+                        world_extracted += 1
+                    timestamp_s = timeline.timestamp_seconds(frames - 1)
+                    evidence = build_frame_evidence(world, frames - 1, timestamp_s)
+                    json.dumps(evidence.to_dict(), allow_nan=False)
+                    serialized_ok += 1
+                wall = time.perf_counter() - start
+                _close(landmarker)
+                landmarker = None
+                return {
+                    "REAL_RUNTIME_SMOKE": "COMPLETE",
+                    "fps_used_hz": round(fps, 4),
+                    "frames_processed": frames,
+                    "pose_frames": pose_frames,
+                    "world_landmark_frames": world_extracted,
+                    "evidence_serialized_ok": serialized_ok,
+                    "processing_wall_seconds": round(wall, 4),
+                }
+        finally:
+            _close(landmarker)
+            landmarker = None
     finally:
         cap.release()
+
+
+def _close(landmarker) -> None:
+    close = getattr(landmarker, "close", None)
+    if callable(close):
+        close()
 
 
 def _build_parser() -> argparse.ArgumentParser:

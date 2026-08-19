@@ -1,20 +1,20 @@
-"""Real KIMORE validation orchestrator (Sprint C, C18; integration-fixed).
+"""Real KIMORE validation orchestrator (Sprint C; execution-contract fixed).
 
 Requires an explicit local skeletal file via ``--load PATH`` and ``--fs`` when
 the sampling rate cannot be derived. It never downloads KIMORE and never
 silently assumes a sampling rate. FPS sensitivity for a real KIMORE run uses the
 REAL normalized sequence (never the synthetic fixture) and is skipped unless a
-valid 30 Hz anchor exists.
+valid 30 Hz anchor exists; only the EXACT ``REAL_KIMORE_NATIVE_SKELETON`` origin
+is treated as real KIMORE.
 
-Pipeline:
-    parse -> normalized_sequence.json
-    evaluate Ex5 -> ex5_evaluation.json   (data_origin set on successful parse)
-    FPS sensitivity -> fps_sensitivity.json (real 30-Hz source only)
-    aggregate / paper / conference / status
+Phasing:
+  PHASE 1: parse (with --fs) -> evaluate Ex5 -> FPS sensitivity
+  PHASE 2: inspect actual outputs -> write local evaluation_status.json
+  PHASE 3: aggregate / paper / conference / mapping / release_check
 
 Status (honest): COMPLETE / PARTIAL_GEOMETRY_ONLY / FAILED / DRY_RUN / PENDING.
-COMPLETE requires successful parse + structural validation + Ex5 evaluation and
-reports temporal/FPS sub-status separately.
+COMPLETE requires successful structural parse + Ex5 evaluation (temporal and FPS
+sub-status are reported separately; tooling failures are recorded separately).
 """
 from __future__ import annotations
 
@@ -32,21 +32,29 @@ RESULTS_DIR = EXPERIMENTS_DIR / "results"
 _PY = sys.executable
 
 
+def _inputs_map(output_dir: Path, include_fps: bool = True) -> str:
+    mapping = {"evaluation": str(output_dir / "ex5_evaluation.json")}
+    if include_fps:
+        mapping["fps_sensitivity"] = str(output_dir / "fps_sensitivity.json")
+    return json.dumps(mapping)
+
+
 def plan_kimore(load_path: Path, output_dir: Path, fs: Optional[float]) -> list[dict]:
     out = Path(output_dir)
     parse_cmd = ["parse", EXPERIMENTS_DIR / "kimore_adapter.py",
                  "--load", str(load_path), "--output", str(out / "normalized_sequence.json")]
+    if fs is not None:
+        parse_cmd += ["--fs", str(fs)]
     evaluate_cmd = ["evaluate_ex5", EXPERIMENTS_DIR / "evaluate_kimore_ex5.py",
                     "--sequence-json", str(out / "normalized_sequence.json"),
                     "--output", str(out / "ex5_evaluation.json")]
-    if fs is not None:
-        evaluate_cmd += ["--fs", str(fs)]
     # FPS sensitivity uses the REAL normalized sequence ONLY (never --synthetic).
     fps_cmd = ["fps_sensitivity", EXPERIMENTS_DIR / "fps_sensitivity.py",
                "--sequence-json", str(out / "normalized_sequence.json"),
                "--output", str(out / "fps_sensitivity.json")]
     aggregate_cmd = ["aggregate", EXPERIMENTS_DIR / "aggregate_results.py",
-                     "--inputs", "{}", "--output-dir", str(out / "aggregate")]
+                     "--inputs", _inputs_map(out),
+                     "--output-dir", str(out / "aggregate")]
     paper_cmd = ["paper_tables", EXPERIMENTS_DIR / "make_paper_tables.py",
                  "--input-dir", str(out), "--output-dir", str(out / "paper")]
     conference_cmd = ["conference", EXPERIMENTS_DIR / "conference_artifacts.py",
@@ -55,8 +63,11 @@ def plan_kimore(load_path: Path, output_dir: Path, fs: Optional[float]) -> list[
     mapping_cmd = ["mapping_report", EXPERIMENTS_DIR / "kimore_mapping_report.py",
                    "--output-dir", str(out / "mapping")]
     return [
-        {"step": c[0], "script": Path(c[1]), "args": c[2:]} for c in
-        (parse_cmd, evaluate_cmd, fps_cmd, aggregate_cmd, paper_cmd, conference_cmd, mapping_cmd)
+        {"step": c[0], "phase": 1, "script": Path(c[1]), "args": c[2:]} for c in
+        (parse_cmd, evaluate_cmd, fps_cmd)
+    ] + [
+        {"step": c[0], "phase": 3, "script": Path(c[1]), "args": c[2:]} for c in
+        (aggregate_cmd, paper_cmd, conference_cmd, mapping_cmd)
     ]
 
 
@@ -88,10 +99,11 @@ def run_kimore(load_path: Path, output_dir: Path, fs: Optional[float], dry_run: 
     output_dir.mkdir(parents=True, exist_ok=True)
     plan = plan_kimore(load_path, output_dir, fs)
     results: list[dict] = []
-    for step in plan:
+
+    def _run_step(step):
         if dry_run:
             results.append({"step": step["step"], "status": "DRY_RUN"})
-            continue
+            return
         cmd = [_PY, str(step["script"])] + [str(a) for a in step["args"]]
         try:
             subprocess.run(cmd, check=True, capture_output=True, text=True)
@@ -99,19 +111,14 @@ def run_kimore(load_path: Path, output_dir: Path, fs: Optional[float], dry_run: 
         except Exception:  # noqa: BLE001 - record sanitized failure
             results.append({"step": step["step"], "status": "failed", "error_type": "subprocess"})
 
-    ok_steps = [r for r in results if r["status"] == "ok"]
-    failed_steps = [r for r in results if r["status"] == "failed"]
-    if dry_run:
-        overall = "DRY_RUN"
-    elif failed_steps and not ok_steps:
-        overall = "FAILED"
-    else:
-        overall = "PARTIAL_GEOMETRY_ONLY"
+    # PHASE 1: parse / evaluate / fps.
+    for step in [s for s in plan if s["phase"] == 1]:
+        _run_step(step)
 
-    # Determine temporal/FPS sub-status from the produced artifacts.
+    # PHASE 2: inspect actual outputs.
     eval_result = _read_json(output_dir / "ex5_evaluation.json")
     fps_result = _read_json(output_dir / "fps_sensitivity.json")
-    parse_succeeded = bool(
+    parse_ok = bool(
         not dry_run
         and any(r["step"] == "parse" and r["status"] == "ok" for r in results)
         and (output_dir / "normalized_sequence.json").exists()
@@ -131,31 +138,33 @@ def run_kimore(load_path: Path, output_dir: Path, fs: Optional[float], dry_run: 
         and fps_result.get("status") != "PENDING_VALID_30HZ_ANCHOR"
     )
 
-    if parse_succeeded and eval_complete and temporal_ok:
-        overall = "COMPLETE"
-    elif (parse_succeeded and eval_complete and not temporal_ok) or overall == "PARTIAL_GEOMETRY_ONLY":
-        overall = "PARTIAL_GEOMETRY_ONLY"
-
-    real_kimore = (
-        "COMPLETE" if (parse_succeeded and eval_complete and temporal_ok)
-        else ("DRY_RUN" if dry_run else (
-            "PARTIAL_GEOMETRY_ONLY" if (parse_succeeded and eval_complete) else (
-                "FAILED" if failed_steps else "PENDING"))
-        )
-    )
-
     local_status = {
         "statuses": {
-            "kimore_adapter_real_data": "COMPLETE" if parse_succeeded and eval_complete else "PENDING",
-            "kimore_ex5_evaluation_real": (
-                "COMPLETE" if eval_complete else ("PENDING" if not dry_run else "DRY_RUN")
+            "kimore_adapter_real_data": "COMPLETE" if (parse_ok and eval_complete) else "PENDING",
+            "kimore_ex5_evaluation_real": "COMPLETE" if eval_complete else ("PENDING" if not dry_run else "DRY_RUN"),
+            "kimore_temporal_analysis": (
+                "COMPLETE" if temporal_ok
+                else ("GEOMETRY_ONLY_TEMPORAL_PENDING" if eval_complete else "PENDING")
             ),
-            "kimore_temporal_analysis": "COMPLETE" if temporal_ok else ("GEOMETRY_ONLY_TEMPORAL_PENDING" if eval_complete else "PENDING"),
             "kimore_fps_sensitivity_real": "COMPLETE" if fps_ran_real else "PENDING",
         },
         "note": "Real-data statuses reflect actual execution; inferred from parsed artifacts, never fabricated.",
     }
     atomic_json_write(output_dir / "evaluation_status.json", local_status)
+
+    # PHASE 3: downstream tooling (runs only after status file exists).
+    for step in [s for s in plan if s["phase"] == 3]:
+        _run_step(step)
+
+    # Honest completion: parse + Ex5 evaluation required; temporal/FPS sub-status.
+    if parse_ok and eval_complete and temporal_ok:
+        real_kimore = "COMPLETE"
+    elif parse_ok and eval_complete:
+        real_kimore = "PARTIAL_GEOMETRY_ONLY"
+    elif any(r["step"] in ("parse", "evaluate_ex5") and r["status"] == "failed" for r in results):
+        real_kimore = "FAILED"
+    else:
+        real_kimore = "DRY_RUN" if dry_run else "PENDING"
 
     summary = {
         "orchestrator": "run_kimore_validation",
@@ -163,8 +172,16 @@ def run_kimore(load_path: Path, output_dir: Path, fs: Optional[float], dry_run: 
         "sampling_rate_required": fs is None,
         "dry_run": dry_run,
         "REAL_KIMORE_VALIDATION": real_kimore,
-        "temporal_status": "COMPLETE" if temporal_ok else ("GEOMETRY_ONLY_TEMPORAL_PENDING" if eval_complete else "PENDING"),
-        "fps_sensitivity_status": "COMPLETE" if fps_ran_real else ("PENDING_VALID_30HZ_ANCHOR" if isinstance(fps_result, dict) and fps_result.get("status") == "PENDING_VALID_30HZ_ANCHOR" else "PENDING"),
+        "temporal_status": (
+            "COMPLETE" if temporal_ok
+            else ("GEOMETRY_ONLY_TEMPORAL_PENDING" if eval_complete else "PENDING")
+        ),
+        "fps_sensitivity_status": (
+            "COMPLETE" if fps_ran_real
+            else ("PENDING_VALID_30HZ_ANCHOR"
+                  if isinstance(fps_result, dict) and fps_result.get("status") == "PENDING_VALID_30HZ_ANCHOR"
+                  else "PENDING")
+        ),
         "steps": results,
         "evaluation_status_file": "evaluation_status.json",
     }

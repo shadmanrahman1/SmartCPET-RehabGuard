@@ -244,7 +244,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         right = angle_sequence_from_knee(seq["joints"], "right_knee")
         origin = "UNKNOWN_UNVALIDATED"
         raw_origin = str(seq.get("data_origin", ""))
-        if raw_origin.startswith("REAL_"):
+        if raw_origin == "REAL_KIMORE_NATIVE_SKELETON":
             origin = "REAL_KIMORE_NATIVE_SKELETON"
         elif raw_origin == "SYNTHETIC_FIXTURE":
             origin = "SYNTHETIC_FIXTURE"
