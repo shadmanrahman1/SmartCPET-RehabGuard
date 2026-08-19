@@ -223,5 +223,133 @@ class ReportValidationTests(unittest.TestCase):
             build_report({"data_origin": "REAL_VIDEO_MEDIAPIPE", "patient_name": "x"})
 
 
+class EndToEndContractTests(unittest.TestCase):
+    """Expose the previously-missed execution bugs (item 15 A-J)."""
+
+    def test_run_explanation_nested_sensitive_no_network(self):
+        from explanation_ui import run_explanation
+        from openrouter_explainer import OpenRouterExplainer
+
+        explainer = OpenRouterExplainer(mode="openrouter", api_key="sk-test-abcdef123", model="m1",
+                                        base_url="https://openrouter.ai/api/v1")
+        evidence = {"quality": {"available": True, "api_key": "sk-secret",
+                                "camera_url": "http://cam", "participant_id": "7"}}
+        with mock.patch("urllib.request.urlopen", side_effect=AssertionError("no network")):
+            audit = run_explanation(evidence, explainer=explainer)
+        self.assertEqual(audit["status"], "INPUT_CONTAINS_SENSITIVE_NO_REMOTE")
+        self.assertIsNone(audit["provider"])
+
+    def test_run_explanation_empty_payload_no_remote(self):
+        from explanation_ui import run_explanation
+        from openrouter_explainer import OpenRouterExplainer
+
+        # Unconfigured openrouter -> NO remote, template fallback.
+        explainer = OpenRouterExplainer(mode="openrouter", api_key="", model="",
+                                        base_url="https://openrouter.ai/api/v1")
+        with mock.patch("urllib.request.urlopen", side_effect=AssertionError("no network")):
+            audit = run_explanation({}, explainer=explainer)
+        self.assertEqual(audit["status"], "OPENROUTER_NOT_CONFIGURED")
+        # Deterministic template fallback is always a clinical-free note.
+        self.assertIn("not a clinical assessment", audit["output"]["safety_note"])
+
+    def test_real_video_aggregate_inputs_not_empty_before_files(self):
+        from run_real_video_validation import plan_real_video
+        with tempfile.TemporaryDirectory() as tmp:
+            video = Path(tmp) / "clip.mp4"
+            video.write_bytes(b"\x00")
+            out = Path(tmp) / "out"  # result files do NOT exist yet
+            plan = plan_real_video(video, out, fps=30.0)
+            agg = next(s for s in plan if s["step"] == "aggregate")
+            idx = agg["args"].index("--inputs")
+            parsed = json.loads(agg["args"][idx + 1])
+            self.assertIn("session", parsed)
+            self.assertIn("smoke", parsed)
+            self.assertIn("benchmark", parsed)
+            self.assertNotEqual(parsed, {})
+
+    def test_release_step_is_after_status_creation(self):
+        from run_real_video_validation import plan_real_video
+        with tempfile.TemporaryDirectory() as tmp:
+            video = Path(tmp) / "clip.mp4"
+            video.write_bytes(b"\x00")
+            out = Path(tmp) / "out"
+            plan = plan_real_video(video, out, fps=30.0)
+            release = next(s for s in plan if s["step"] == "release_check")
+            self.assertEqual(release["phase"], 3)
+            self.assertIn("--evaluation-status", release["args"])
+
+    def test_kimore_adapter_load_fs_and_origin(self):
+        import kimore_adapter
+        from kimore_adapter import main as kimore_main
+
+        fake_joints = {"left_knee": {"x": [1.0, 2.0], "y": [1.0, 2.0], "z": [0.0, 0.0]},
+                       "right_knee": {"x": [2.0, 3.0], "y": [1.0, 2.0], "z": [0.0, 0.0]}}
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "seq.mat"
+            src.write_bytes(b"\x00")
+            out = Path(tmp) / "norm.json"
+            with mock.patch.object(kimore_adapter, "parse_joint_table", return_value=fake_joints):
+                kimore_main(["--load", str(src), "--fs", "30", "--output", str(out)])
+            seq = json.loads(out.read_text(encoding="utf-8"))
+            self.assertEqual(seq["sampling_rate_hz"], 30.0)
+            self.assertEqual(seq["data_origin"], "REAL_KIMORE_NATIVE_SKELETON")
+            self.assertEqual(seq["validation_status"], "PARSED_SEQUENCE_VALIDATED")
+
+    def test_kimore_plan_fps_consumes_normalized_and_aggregate_inputs_nonempty(self):
+        from run_kimore_validation import plan_kimore
+        with tempfile.TemporaryDirectory() as tmp:
+            seq = Path(tmp) / "seq.mat"
+            seq.write_bytes(b"\x00")
+            out = Path(tmp) / "out"
+            plan = plan_kimore(seq, out, fs=30.0)
+            fps = next(s for s in plan if s["step"] == "fps_sensitivity")
+            agg = next(s for s in plan if s["step"] == "aggregate")
+            self.assertIn(str(out / "normalized_sequence.json"), [str(a) for a in fps["args"]])
+            idx = agg["args"].index("--inputs")
+            parsed = json.loads(agg["args"][idx + 1])
+            self.assertIn("evaluation", parsed)
+            self.assertIn("fps_sensitivity", parsed)
+            self.assertNotEqual(parsed, {})
+
+    def test_kimore_conference_after_status_file(self):
+        from run_kimore_validation import plan_kimore
+        with tempfile.TemporaryDirectory() as tmp:
+            seq = Path(tmp) / "seq.mat"
+            seq.write_bytes(b"\x00")
+            out = Path(tmp) / "out"
+            plan = plan_kimore(seq, out, fs=30.0)
+            conference = next(s for s in plan if s["step"] == "conference")
+            self.assertEqual(conference["phase"], 3)
+            self.assertIn(str(out / "evaluation_status.json"), [str(a) for a in conference["args"]])
+
+    def test_release_requires_kimore_ex5_evaluation(self):
+        from release_check import check
+        statuses = self._common_status()
+        statuses.update({"real_video_smoke": "COMPLETE", "runtime_benchmark_real_video": "COMPLETE",
+                         "kimore_adapter_real_data": "COMPLETE",
+                         "kimore_ex5_evaluation_real": "PENDING"})
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "status.json"
+            path.write_text(json.dumps({"statuses": statuses}, allow_nan=False), encoding="utf-8")
+            result = check(path)
+            self.assertEqual(result["empirical_results"], "NOT_READY_FOR_EMPIRICAL_RESULTS")
+            self.assertNotEqual(result["primary"], "READY_FOR_EMPIRICAL_RESULTS")
+
+    def _common_status(self):
+        return {
+            "unit_tests": "COMPLETE", "ci": "COMPLETE",
+            "fps_sensitivity_synthetic": "COMPLETE",
+            "missingness_sensitivity_synthetic": "COMPLETE",
+            "landmark_robustness_synthetic": "COMPLETE",
+        }
+
+    def test_release_dict_status_compound_not_one_leaf(self):
+        from release_check import _status_complete
+        self.assertFalse(_status_complete({"parse": "COMPLETE", "evaluation": "PENDING"}))
+        self.assertTrue(_status_complete({"parse": "COMPLETE", "evaluation": "COMPLETE"}))
+        self.assertFalse(_status_complete({"status": "PENDING"}))
+        self.assertTrue(_status_complete({"status": "COMPLETE"}))
+
+
 if __name__ == "__main__":
     unittest.main()

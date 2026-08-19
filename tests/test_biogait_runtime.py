@@ -473,5 +473,21 @@ class WorkerStreamOwnershipTests(unittest.TestCase):
         self.assertIn("CONNECTING", emitted)
 
 
+class ExplanationWorkerRunTests(unittest.TestCase):
+    """ExplanationWorker emits its result/finished signals on a (template) run."""
+
+    def test_success_run_emits_result(self):
+        from ui_worker import ExplanationWorker
+
+        worker = object.__new__(ExplanationWorker)  # QThread stub has no __init__
+        worker._evidence = {}
+        worker._force = False
+        worker.result_ready = mock.MagicMock()
+        worker.finished_ok = mock.MagicMock()
+        worker.run()  # run() directly exercises the same path
+        worker.result_ready.emit.assert_called_once()
+        worker.finished_ok.emit.assert_called_once_with(True)
+
+
 if __name__ == "__main__":
     unittest.main()
