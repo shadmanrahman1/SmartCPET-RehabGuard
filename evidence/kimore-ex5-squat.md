@@ -11,7 +11,12 @@
   REhabilitation*. IEEE Transactions on Neural Systems and Rehabilitation
   Engineering.
 - **DOI:** [10.1109/TNSRE.2019.2923060](https://doi.org/10.1109/TNSRE.2019.2923060)
-- **Reviewed source implementation:** `petteriTeikari/KiMoRe_wrapper`
+- **Reviewed source implementation:** the KiMoRe_wrapper repository
+  (e.g. `petteriTeikari/KiMoRe_wrapper`) distributes MATLAB scripts that it
+  labels as the original KiMoRe analysis scripts. These reviewed scripts are
+  treated here as implementation evidence of the source's algorithm structure;
+  the repository is **not** claimed to be an official author repository, and
+  the KIMORE paper remains the primary scientific citation.
   - `matlab/matlab_original/feat_extract_Ex5.m`
   - `matlab/matlab_original/filtering.m`
 

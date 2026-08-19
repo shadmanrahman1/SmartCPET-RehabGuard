@@ -303,16 +303,26 @@ class CameraWorker(QObject):
         if latest:
             latest_left = latest["primary_outcomes"]["left_knee_sagittal_deg"]
             latest_right = latest["primary_outcomes"]["right_knee_sagittal_deg"]
+            left_ok = latest_quality.get("left_po_available", False)
+            right_ok = latest_quality.get("right_po_available", False)
         else:
             latest_left = latest_right = None
+            left_ok = right_ok = False
+
+        # Information-neutral current-PO state (no clinical colour semantics).
+        if left_ok and right_ok:
+            current_po_state = "complete"
+        elif left_ok or right_ok:
+            current_po_state = "partial"
+        else:
+            current_po_state = "unavailable"
 
         payload = {
             "left_knee_sagittal_deg": latest_left,
             "right_knee_sagittal_deg": latest_right,
             # Current evidence availability = latest frame's PO availability.
-            "available": bool(
-                latest_quality.get("available") if latest else False
-            ),
+            "available": bool(left_ok and right_ok),
+            "current_po_state": current_po_state,
             "quality": latest_quality,
             # Rolling window metrics (separate from the current frame state).
             "rolling_po_availability_rate": (

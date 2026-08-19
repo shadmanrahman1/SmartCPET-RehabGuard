@@ -161,6 +161,35 @@ def detect_minima(
 
 # ── Timestamp integrity (item: validate temporal timestamps) ──────────────────
 
+def _coerce_float(value, index: int) -> tuple[Optional[float], Optional[str]]:
+    """Deterministically convert a timestamp element to float.
+
+    Handles None, NaN, +-inf, and non-numeric strings/objects by returning a
+    structured issue message instead of raising an uncaught conversion error.
+    Returns ``(value, None)`` on success or ``(None, issue)`` on failure.
+    """
+    if value is None:
+        return None, f"timestamp {index} is None"
+    if isinstance(value, str):
+        stripped = value.strip()
+        try:
+            converted = float(stripped)
+        except ValueError:
+            return None, f"timestamp {index} is not numeric ({value!r})"
+        if not math.isfinite(converted):
+            return None, f"timestamp {index} is not finite"
+        return converted, None
+    if isinstance(value, bool):
+        return 1.0 if value else 0.0, None
+    try:
+        converted = float(value)
+    except (TypeError, ValueError):
+        return None, f"timestamp {index} is not numeric ({type(value).__name__})"
+    if not math.isfinite(converted):
+        return None, f"timestamp {index} is not finite"
+    return converted, None
+
+
 def validate_timestamps(
     timestamps: Optional[Sequence[float]],
     n_samples: int,
@@ -171,20 +200,28 @@ def validate_timestamps(
 
     Returns ``(ok, issue)``. When ``timestamps is None`` the caller will
     derive time from ``fs`` instead, so ``(True, None)`` is returned.
-    A non-uniform-at-``uniform_at`` result is reported separately.
+    A non-uniform-at-``uniform_at`` result is reported separately. Malformed
+    elements (None, NaN, +-inf, non-numeric strings/objects) are handled
+    deterministically and reported as issues — never as an uncaught exception.
+    ``uniform_at`` must itself be a finite positive rate.
     """
     if timestamps is None:
         return True, None
+    if not math.isfinite(uniform_at) or uniform_at <= 0:
+        return False, f"uniform_at must be a finite positive rate (got {uniform_at!r})"
     if len(timestamps) != n_samples:
         return False, (
             f"timestamp count ({len(timestamps)}) does not match "
             f"angle count ({n_samples})"
         )
-    values = [float(t) for t in timestamps]
+    values: list[float] = []
+    for index, raw in enumerate(timestamps):
+        converted, issue = _coerce_float(raw, index)
+        if issue is not None:
+            return False, issue
+        values.append(converted)
     prev = None
     for i, t in enumerate(values):
-        if t is None or not math.isfinite(t):
-            return False, f"timestamp {i} is missing or non-finite"
         if prev is not None and t <= prev:
             return False, f"timestamps are not strictly increasing at index {i}"
         prev = t
@@ -197,6 +234,17 @@ def validate_timestamps(
                 f"(interval {dt:.6f} s at index {i})"
             )
     return True, None
+
+
+def _warning_result(fs: float, classification: str, warning: str, adapted_note=None) -> dict:
+    """A minimal structured warning result (no filtering/peak detection ran)."""
+    result = _base_result(fs=fs)
+    result["classification"] = classification
+    result["offline"] = True
+    result["warning"] = warning
+    if adapted_note:
+        result["adapted_note"] = adapted_note
+    return result
 
 
 def _base_result(
@@ -351,18 +399,14 @@ def kimore_reference_ex5_temporal_analysis(
     parameters; this path never passes an arbitrary FPS to it.
     """
     if any(v is None for v in angle_stream):
-        result = _base_result(fs=fs)
-        result["classification"] = "REFERENCE_DERIVED"
-        result["offline"] = True
-        result["warning"] = "missing_samples_require_resampling"
-        return result
+        return _warning_result(fs, "REFERENCE_DERIVED", "missing_samples_require_resampling")
 
-    if not math.isclose(float(fs), KIMORE_REFERENCE_FS_HZ, rel_tol=0.0, abs_tol=_FS_TOLERANCE_HZ):
-        result = _base_result(fs=fs)
-        result["classification"] = "REFERENCE_DERIVED"
-        result["offline"] = True
-        result["warning"] = "reference_requires_30hz_or_resampling"
-        return result
+    fs_f = float(fs)
+    if not math.isfinite(fs_f) or fs_f <= 0:
+        return _warning_result(fs, "REFERENCE_DERIVED", "invalid_reference_fs")
+
+    if not math.isclose(fs_f, KIMORE_REFERENCE_FS_HZ, rel_tol=0.0, abs_tol=_FS_TOLERANCE_HZ):
+        return _warning_result(fs, "REFERENCE_DERIVED", "reference_requires_30hz_or_resampling")
 
     ok, issue = validate_timestamps(timestamps, len(angle_stream), uniform_at=KIMORE_REFERENCE_FS_HZ)
     if timestamps is not None and not ok:
@@ -371,11 +415,7 @@ def kimore_reference_ex5_temporal_analysis(
             if "not uniform" in issue
             else f"invalid_reference_timestamps: {issue}"
         )
-        result = _base_result(fs=fs)
-        result["classification"] = "REFERENCE_DERIVED"
-        result["offline"] = True
-        result["warning"] = warning
-        return result
+        return _warning_result(fs, "REFERENCE_DERIVED", warning)
 
     return _run_ex5_pipeline(
         [float(a) for a in angle_stream],
@@ -400,25 +440,27 @@ def kimore_adapted_ex5_temporal_analysis(
     uniform at ``fs`` (the Butterworth filter assumes fixed-rate samples).
     """
     if any(v is None for v in angle_stream):
-        result = _base_result(fs=fs)
-        result["classification"] = "ENGINEERING_ADAPTED"
-        result["offline"] = True
-        result["warning"] = "missing_samples_require_resampling"
-        result["adapted_note"] = ADAPTED_NOTE
-        return result
+        return _warning_result(
+            fs, "ENGINEERING_ADAPTED", "missing_samples_require_resampling",
+            adapted_note=ADAPTED_NOTE,
+        )
 
-    ok, issue = validate_timestamps(timestamps, len(angle_stream), uniform_at=float(fs))
+    fs_f = float(fs)
+    if not math.isfinite(fs_f) or fs_f <= 0:
+        return _warning_result(
+            fs, "ENGINEERING_ADAPTED", "invalid_adapted_fs", adapted_note=ADAPTED_NOTE,
+        )
+
+    ok, issue = validate_timestamps(timestamps, len(angle_stream), uniform_at=fs_f)
     if timestamps is not None and not ok:
-        result = _base_result(fs=fs)
-        result["classification"] = "ENGINEERING_ADAPTED"
-        result["offline"] = True
-        result["warning"] = (
+        warning = (
             "adapted_requires_uniform_sampling_or_resampling"
             if "not uniform" in issue
             else f"invalid_adapted_timestamps: {issue}"
         )
-        result["adapted_note"] = ADAPTED_NOTE
-        return result
+        return _warning_result(
+            fs, "ENGINEERING_ADAPTED", warning, adapted_note=ADAPTED_NOTE,
+        )
 
     return _run_ex5_pipeline(
         [float(a) for a in angle_stream],

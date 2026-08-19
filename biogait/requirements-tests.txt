@@ -1,0 +1,10 @@
+# BioGait automated TEST dependencies (Sprint B) — used by CI.
+#
+# The BioGait unit test suite stubs cv2 / mediapipe / PyQt5 at module load, so
+# the only third-party packages needed to import and run the automated tests
+# are numpy and scipy. Adding heavier runtime deps here would slow CI without
+# enabling more tests. matplotlib is intentionally NOT required by the tests
+# (only the (optional) paper-figure generator uses it, via
+# requirements-evaluation.txt).
+numpy>=1.24,<3.0
+scipy>=1.9,<2.0

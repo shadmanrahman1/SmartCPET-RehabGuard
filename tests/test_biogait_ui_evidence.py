@@ -90,6 +90,13 @@ def _add_no_pose(worker, idx=1, timestamp=0.033):
     worker._evidence_acc.add(ev.to_dict())
 
 
+def _add_partial_left_unavailable(worker, idx=1, timestamp=0.033):
+    scene = _scene()
+    del scene["left_ankle"]  # invalidates ONLY the left primary outcome
+    ev = build_frame_evidence(scene, idx, timestamp)
+    worker._evidence_acc.add(ev.to_dict())
+
+
 class CurrentVsRollingTests(unittest.TestCase):
     def test_no_pose_current_frame_does_not_show_stale_values(self):
         worker, payloads = _make_worker()
@@ -112,6 +119,27 @@ class CurrentVsRollingTests(unittest.TestCase):
         self.assertIs(payload["available"], True)
         self.assertIsNotNone(payload["left_knee_sagittal_deg"])
         self.assertIsNotNone(payload["right_knee_sagittal_deg"])
+        self.assertEqual(payload["current_po_state"], "complete")
+
+    def test_partial_current_po_state_when_one_side_unavailable(self):
+        # B0.3: exactly one PO available => "partial", never a bare
+        # "unavailable" while a valid left value is shown.
+        worker, payloads = _make_worker()
+        _add_partial_left_unavailable(worker, 0, 0.0)
+        worker._emit_evidence()
+        payload = payloads[-1]
+        self.assertIsNone(payload["left_knee_sagittal_deg"])
+        self.assertIsNotNone(payload["right_knee_sagittal_deg"])
+        self.assertEqual(payload["current_po_state"], "partial")
+        self.assertIs(payload["available"], False)
+
+    def test_no_pose_current_po_state_unavailable(self):
+        worker, payloads = _make_worker()
+        _add_available(worker, 0, 0.0)
+        _add_no_pose(worker, 1, 0.033)
+        worker._emit_evidence()
+        payload = payloads[-1]
+        self.assertEqual(payload["current_po_state"], "unavailable")
 
     def test_rolling_availability_still_reported(self):
         worker, payloads = _make_worker()

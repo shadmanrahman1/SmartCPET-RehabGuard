@@ -1,0 +1,6 @@
+# Ignore generated BioGait experiment outputs (B15).
+# Only the README and the evaluation status manifest are tracked.
+*
+!README.md
+!evaluation_status.json
+!.gitignore

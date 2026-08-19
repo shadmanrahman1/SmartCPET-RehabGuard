@@ -70,6 +70,8 @@ Thumbs.db
 biogait/latest_metrics.json
 biogait/outputs/
 biogait/__pycache__/
+# MediaPipe pose model artifact (auto-downloaded; do not commit)
+biogait/pose_landmarker_lite.task
 
 # ── CPET runtime artifacts ─────────────────────────────────────────────────────
 cpet/backend/__pycache__/
