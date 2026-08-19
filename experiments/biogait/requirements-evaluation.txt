@@ -1,0 +1,15 @@
+# BioGait EVALUATION dependencies (Sprint B).
+#
+# These are the packages used by the evaluation/reproducibility experiment
+# tooling under experiments/biogait/. The automated BioGait unit tests do NOT
+# require matplotlib (see biogait/requirements-tests.txt); matplotlib is only
+# needed by the (optional, data-gated) paper-figure generator
+# (make_paper_figures.py).
+#
+# NOTE: these are conservative compatibility ranges, NOT verified-working
+# pins. Exact reproducibility locking is pending a clean-environment
+# verification step; do not interpret these ranges as guaranteed-working
+# versions.
+numpy>=1.24,<3.0
+scipy>=1.9,<2.0
+matplotlib>=3.7,<4.0
