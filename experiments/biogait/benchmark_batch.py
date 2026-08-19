@@ -89,6 +89,46 @@ def _aggregate(rows: list[dict]) -> dict:
     }
 
 
+def run_benchmark_single(video: Path, output_dir: Path, fps_override=None) -> dict:
+    """Measure a single explicit video and write a compatible benchmark_batch.json.
+
+    Produces the same ``summary.REAL_VIDEO_BENCHMARK == COMPLETE`` shape that
+    ``make_paper_tables`` reads for Table 5, from real measured execution.
+    """
+    import benchmark_video as bv
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    key = opaque_key(video.name)
+    row = bv.benchmark(video, output_dir / f"{key}.json", fps_override)
+    row["sequence_key"] = key
+    row["status"] = "ok"
+    row["data_origin"] = "REAL_VIDEO_MEDIAPIPE"
+    summary = _aggregate([row])
+    result = {
+        "experiment": "benchmark_batch",
+        "schema_version": "1.0",
+        "timing_model": "constant_frame_rate_from_fps",
+        "n_videos_requested": 1,
+        "summary": summary,
+        "per_video": [row],
+    }
+    atomic_json_write(output_dir / "benchmark_batch.json", result)
+    with open(output_dir / "benchmark_batch.csv", "w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(
+            fh,
+            fieldnames=["sequence_key", "status", "data_origin", "fps_used_hz",
+                        "frame_width_px", "frame_height_px", "total_frames",
+                        "world_landmark_availability_rate", "processing_wall_seconds",
+                        "mean_ms_per_frame", "median_ms_per_frame", "p95_ms_per_frame",
+                        "effective_throughput_fps", "error_type"],
+            extrasaction="ignore",
+        )
+        writer.writeheader()
+        writer.writerow(row)
+    return result
+
+
 def run_benchmark_batch(input_dir: Optional[Path], output_dir: Path, fps_override=None) -> dict:
     import benchmark_video as bv
 
@@ -153,6 +193,7 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Runtime benchmark across local videos (measured values only).",
     )
     p.add_argument("--input-dir", default=None)
+    p.add_argument("--video", default=None, help="measure a single explicit video")
     p.add_argument("--output-dir", required=True)
     p.add_argument("--fps", type=float, default=None)
     return p
@@ -160,11 +201,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[list[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
-    result = run_benchmark_batch(
-        Path(args.input_dir) if args.input_dir else None,
-        Path(args.output_dir),
-        args.fps,
-    )
+    out = Path(args.output_dir)
+    if args.video:
+        result = run_benchmark_single(Path(args.video), out, args.fps)
+    else:
+        result = run_benchmark_batch(
+            Path(args.input_dir) if args.input_dir else None,
+            out,
+            args.fps,
+        )
     print(json.dumps(result, indent=2, allow_nan=False))
     return 0
 
