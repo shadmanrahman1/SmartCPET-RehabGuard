@@ -107,7 +107,27 @@ provides a bounded real-runtime smoke check (`REAL_RUNTIME_SMOKE`).
   validation remain PENDING / DEFERRED until licensed/synchronized data is
   available under a consented protocol.
 
+## 11. Data origin vs method provenance
+
+Every experiment result carries an explicit `data_origin` distinct from its
+`method_provenance`:
+
+- `data_origin`: `SYNTHETIC_FIXTURE` / `REAL_KIMORE_NATIVE_SKELETON` /
+  `REAL_VIDEO_MEDIAPIPE` / `UNKNOWN_UNVALIDATED`.
+- `method_provenance`: `REFERENCE_DERIVED` / `ENGINEERING_ADAPTED` /
+  `DESCRIPTIVE` (and `EXPERIMENTAL` for robustness experiments).
+- `execution_status`: `COMPLETE` / `PENDING`, etc.
+
+`REFERENCE_DERIVED` describes the METHOD and never implies real KIMORE data.
+Synthetic experiments validate software behavior, provenance routing, and
+robustness logic — they do NOT validate clinical accuracy, MediaPipe accuracy,
+KIMORE dataset performance, or participant performance. Native KIMORE
+evaluation, when real licensed data is supplied, validates source-data
+execution of the Python feature pipeline; it still does NOT validate
+MediaPipe-vs-Kinect accuracy.
+
 ## Status manifest
 
 See `experiments/biogait/results/evaluation_status.json` for the current
-statuses of each evaluation artifact.
+statuses of each evaluation artifact, including per-table status classes
+(EMPIRICAL_COMPLETE / SYNTHETIC_ONLY / PENDING_DATA).

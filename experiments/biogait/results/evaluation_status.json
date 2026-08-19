@@ -4,14 +4,22 @@
   "updated": "2026-08-19",
   "statuses": {
     "unit_tests": "COMPLETE",
-    "ci": "PENDING",
+    "ci": "COMPLETE",
     "kimore_adapter_real_data": "PENDING",
+    "kimore_adapter_joint_position": "IMPLEMENTED_REAL_DATA_PENDING",
     "kimore_ex5_evaluation_synthetic": "COMPLETE",
     "kimore_ex5_evaluation_real": "PENDING",
     "fps_sensitivity_synthetic": "COMPLETE",
     "missingness_sensitivity_synthetic": "COMPLETE",
     "landmark_robustness_synthetic": "COMPLETE",
-    "paper_tables": "COMPLETE",
+    "paper_tables": {
+      "table1_components": "COMPLETE",
+      "table2_kimore_mapping": "COMPLETE",
+      "table3_protocol": "COMPLETE",
+      "table4_robustness": "SYNTHETIC_ONLY",
+      "table5_runtime_benchmark": "PENDING_DATA",
+      "table6_fps_sensitivity": "SYNTHETIC_ONLY"
+    },
     "paper_figures": "PENDING",
     "real_video_smoke": "PENDING",
     "runtime_benchmark_real_video": "PENDING",
@@ -19,17 +27,18 @@
   },
   "notes": {
     "unit_tests": "Automated BioGait test suite passes (compileall + unittest).",
-    "ci": "GitHub Actions workflow added (.github/workflows/biogait-tests.yml); not yet run on this branch.",
-    "kimore_adapter_real_data": "Local-only adapter built; real KIMORE dataset was NOT available/not downloaded. Results are never fabricated.",
-    "kimore_ex5_evaluation_real": "PENDING until licensed KIMORE Ex5 skeletal data is supplied via KIMORE_DATASET_ROOT.",
-    "fps_sensitivity_synthetic": "Deterministic synthetic angle-sequence experiment executed (results gitignored).",
-    "missingness_sensitivity_synthetic": "Deterministic synthetic missingness experiment executed (results gitignored).",
-    "landmark_robustness_synthetic": "Feature-specific landmark-loss availability matrix built from synthetic fixtures.",
-    "paper_tables": "Markdown + CSV tables generated; numeric benchmark/FPS tables are PENDING_DATA (no fabricated values).",
-    "paper_figures": "matplotlib unavailable in the current environment; figures will render only when matplotlib + data are present (no fabricated curves).",
+    "ci": "GitHub Actions workflow 'BioGait tests' has PASSED on the current PR head (COMPLETE).",
+    "kimore_adapter_real_data": "Local-only adapter built; real KIMORE dataset was NOT available and none was downloaded. Results are never fabricated.",
+    "kimore_adapter_joint_position": "Joint_Position fixed-column parsing implemented (validated against the reviewed column convention); real dataset execution remains pending until a local KIMORE sequence is supplied.",
+    "kimore_ex5_evaluation_real": "PENDING until licensed KIMORE Ex5 skeletal data is supplied (via KIMORE_DATASET_ROOT / --load). Geometry may run; temporal filtering requires an explicit sampling rate.",
+    "fps_sensitivity_synthetic": "Deterministic synthetic angle-sequence experiment executed; data_origin=SYNTHETIC_FIXTURE (results gitignored). Not an empirical dataset result.",
+    "missingness_sensitivity_synthetic": "Deterministic synthetic missingness experiment executed; data_origin=SYNTHETIC_FIXTURE.",
+    "landmark_robustness_synthetic": "Feature-specific landmark-loss availability matrix built from synthetic fixtures; data_origin=SYNTHETIC_FIXTURE.",
+    "paper_tables": "Per-table status: components/mapping/protocol are structural; robustness + FPS are SYNTHETIC_ONLY; runtime benchmark is PENDING_DATA. Synthetic values are software/algorithm validation, never participant/dataset results.",
+    "paper_figures": "matplotlib unavailable in the current environment; figures will render only when matplotlib + data are present (no fabricated curves), and synthetic inputs will be labelled as synthetic fixtures.",
     "real_video_smoke": "PENDING — no real video supplied; smoke_runtime.py reports PENDING safely.",
     "runtime_benchmark_real_video": "PENDING — no real video supplied; benchmark tools write no numeric result without real execution.",
     "mediapipe_vs_kinect_validation": "DEFERRED unless synchronized RGB + Kinect capture and a defensible alignment method exist."
   },
-  "data_policy": "No raw datasets, raw biomedical video, local paths, or participant names are committed. Generated numeric results live under experiments/biogait/results/ and are gitignored."
+  "data_policy": "No raw datasets, raw biomedical video, local paths, video filenames, or participant names are committed. Generated numeric results live under experiments/biogait/results/ and are gitignored."
 }

@@ -22,3 +22,29 @@ Search targets (B23): `clinically validated`, `diagnostic`, `correct squat`,
 `incorrect squat`, `Kinect-equivalent`, `clinical score`, `gold standard`.
 Any occurrence in BioGait changed files must be a negation/limitation or
 removed.
+
+## Synthetic vs empirical validation scope
+
+Synthetic experiments (SYNTHETIC_FIXTURE) validate:
+
+- software/algorithm behavior,
+- provenance routing (method_provenance and data_origin separation), and
+- expected robustness logic (feature-loss / missingness coverage).
+
+They do NOT validate:
+
+- clinical accuracy,
+- MediaPipe monocular accuracy,
+- KIMORE dataset performance, or
+- participation participant performance.
+
+Native KIMORE skeletal evaluation (REAL_KIMORE_NATIVE_SKELETON), when real
+licensed data is supplied, validates only:
+
+- source-data execution of the Python feature pipeline.
+
+It still does NOT validate MediaPipe monocular accuracy against Kinect
+(that remains DEFERRED). `data_origin` is distinct from `method_provenance`;
+`REFERENCE_DERIVED` describes the method, never the data origin. Synthetic
+numeric values are software validation and must never be reported as
+participant or dataset results.
