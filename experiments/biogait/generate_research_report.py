@@ -24,7 +24,21 @@ def _md_field(label: str, value: Any) -> str:
     return f"- **{label}:** {value}\n"
 
 
+def _validate_session(session) -> None:
+    """Validate that the input is a BioGait structured research object.
+
+    Rejects non-dicts, NaN/Infinity, forbidden identity keys, and invalid
+    data_origin/processing_mode/provenance enums. Missing optional fields are
+    fine (None values allowed).
+    """
+    if not isinstance(session, dict):
+        raise ValueError("session must be a structured dict")
+    from evidence_schema import validate_evidence_record
+    validate_evidence_record(session)
+
+
 def build_report(session: dict) -> str:
+    _validate_session(session)
     coverage = (
         f"left={session.get('po_coverage', {}).get('left')}; "
         f"right={session.get('po_coverage', {}).get('right')}"
@@ -156,7 +170,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     if session is None:
         print("[generate_research_report] ERROR: session not found")
         return 1
-    report = build_report(session)
+    try:
+        report = build_report(session)
+    except ValueError as exc:
+        print(f"[generate_research_report] ERROR: invalid BioGait research session: {exc}")
+        return 1
     print(report)
     if args.output:
         Path(args.output).write_text(report, encoding="utf-8")

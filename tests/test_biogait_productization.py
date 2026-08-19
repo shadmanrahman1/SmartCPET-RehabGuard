@@ -139,7 +139,7 @@ class OrchestratorTests(unittest.TestCase):
             out = Path(tmp) / "out"
             result = run_kimore(seq, out, fs=None, dry_run=True)
             self.assertTrue(result["sampling_rate_required"])
-            self.assertEqual(result["REAL_KIMORE_VALIDATION"], "PENDING")
+            self.assertEqual(result["REAL_KIMORE_VALIDATION"], "DRY_RUN")
 
     def test_orchestrator_missing_file_raises(self):
         from run_real_video_validation import run_real_video

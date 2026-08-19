@@ -20,6 +20,23 @@ from common import BIOGAIT_DIR, load_json
 _DEFAULT_STATUS = Path(__file__).resolve().parent / "results" / "evaluation_status.json"
 
 
+_COMPLETE_STRINGS = ("COMPLETE", "READY_FOR_EMPIRICAL_RESULTS")
+
+
+def _status_complete(value: Any) -> bool:
+    """True when a status value is COMPLETE-equivalent.
+
+    Strings are compared against a fixed complete set; dicts are considered
+    complete ONLY if they contain at least one nested COMPLETE-equivalent leaf
+    (an arbitrary dict never counts as complete by itself).
+    """
+    if isinstance(value, str):
+        return value in _COMPLETE_STRINGS
+    if isinstance(value, dict):
+        return any(_status_complete(v) for v in value.values())
+    return False
+
+
 def check(status_path: Optional[Path] = None) -> dict[str, Any]:
     status = load_json(status_path) if status_path else load_json(_DEFAULT_STATUS)
     statuses = status.get("statuses", {}) if isinstance(status, dict) else {}
@@ -31,8 +48,7 @@ def check(status_path: Optional[Path] = None) -> dict[str, Any]:
     real_benchmark = statuses.get("runtime_benchmark_real_video", "PENDING")
     real_kimore = statuses.get("kimore_adapter_real_data", "PENDING")
     synthetic_ok = all(
-        statuses.get(k, "PENDING") in ("COMPLETE", "IMPLEMENTED_REAL_DATA_PENDING")
-        or isinstance(statuses.get(k), (dict,))
+        _status_complete(statuses.get(k))
         for k in ("fps_sensitivity_synthetic", "missingness_sensitivity_synthetic",
                   "landmark_robustness_synthetic")
     )
@@ -51,39 +67,44 @@ def check(status_path: Optional[Path] = None) -> dict[str, Any]:
         "methods_snapshot_present": methods_snapshot_present,
     }
 
+    # Code-demo readiness requires unit tests, CI, model, and claim/docs.
     code_demo_ready = (
-        unit_tests == "COMPLETE" and model_present and claim_matrix_present
+        _status_complete(unit_tests)
+        and _status_complete(ci)
+        and model_present
+        and claim_matrix_present
         and methods_snapshot_present
     )
     empirical_ready = (
         code_demo_ready
-        and real_video_smoke == "COMPLETE"
-        and real_benchmark == "COMPLETE"
-        and real_kimore == "COMPLETE"
+        and _status_complete(real_video_smoke)
+        and _status_complete(real_benchmark)
+        and _status_complete(real_kimore)
     )
 
     if empirical_ready:
-        release_state = "READY_FOR_EMPIRICAL_RESULTS"
-    elif code_demo_ready:
-        release_state = "READY_FOR_CODE_DEMO_AND_SYNTHETIC_METHODS_REPORT"
-    else:
-        release_state = "NOT_READY"
-
-    # Normalized primary output per spec.
-    if real_kimore == "COMPLETE" and real_video_smoke == "COMPLETE":
-        primary = "READY_FOR_EMPIRICAL_RESULTS"
+        release_check = "READY_FOR_EMPIRICAL_RESULTS"
     elif code_demo_ready or synthetic_ok:
-        primary = "READY_FOR_CODE_DEMO / READY_FOR_SYNTHETIC_METHODS_REPORT"
+        release_check = "READY_FOR_CODE_DEMO / READY_FOR_SYNTHETIC_METHODS_REPORT"
     else:
-        primary = "NOT_READY_FOR_EMPIRICAL_RESULTS"
+        release_check = "NOT_READY_FOR_EMPIRICAL_RESULTS"
+
+    # primary can NEVER say empirical unless empirical_ready is True.
+    primary = (
+        "READY_FOR_EMPIRICAL_RESULTS"
+        if empirical_ready
+        else (release_check if code_demo_ready or synthetic_ok
+              else "NOT_READY_FOR_EMPIRICAL_RESULTS")
+    )
 
     return {
-        "release_check": "READY_FOR_CODE_DEMO" if code_demo_ready else (
-            "READY_FOR_SYNTHETIC_METHODS_REPORT" if synthetic_ok else "NOT_READY"
+        "release_check": release_check,
+        "empirical_results": (
+            "READY_FOR_EMPIRICAL_RESULTS" if empirical_ready
+            else "NOT_READY_FOR_EMPIRICAL_RESULTS"
         ),
-        "empirical_results": "READY_FOR_EMPIRICAL_RESULTS" if empirical_ready else "NOT_READY_FOR_EMPIRICAL_RESULTS",
-        "checks": checks,
         "primary": primary,
+        "checks": checks,
         "note": (
             "Engineering/research statuses only. This is not a clinical, "
             "deployment, or medical-readiness statement."

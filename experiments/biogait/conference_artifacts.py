@@ -79,6 +79,29 @@ def results_status_md(evaluation_status: dict) -> str:
     return "\n".join(lines)
 
 
+def _status_cell(evaluation_status: dict, key: str, default: str) -> str:
+    statuses = evaluation_status.get("statuses", {}) if isinstance(evaluation_status, dict) else {}
+    return statuses.get(key, default)
+
+
+def _derive_table5(evaluation_status: Optional[dict]) -> str:
+    if evaluation_status is None:
+        return "PENDING_DATA"
+    if _status_cell(evaluation_status, "runtime_benchmark_real_video", "PENDING") == "COMPLETE":
+        return "EMPIRICAL_COMPLETE"
+    return "PENDING_DATA"
+
+
+def _derive_table6(evaluation_status: Optional[dict]) -> str:
+    if evaluation_status is None:
+        return "PENDING_DATA"
+    if _status_cell(evaluation_status, "kimore_fps_sensitivity_real", "PENDING") == "COMPLETE":
+        return "EMPIRICAL_COMPLETE"
+    if _status_cell(evaluation_status, "fps_sensitivity_synthetic", "COMPLETE") == "COMPLETE":
+        return "SYNTHETIC_ONLY"
+    return "PENDING_DATA"
+
+
 def generate(output_dir: Path, evaluation_status_path: Optional[Path]) -> dict:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -91,25 +114,29 @@ def generate(output_dir: Path, evaluation_status_path: Optional[Path]) -> dict:
         results_status_md(evaluation_status or {}), encoding="utf-8"
     )
 
+    table4 = "SYNTHETIC_ONLY"  # landmark robustness is synthetic-only today
+    table5 = _derive_table5(evaluation_status)
+    table6 = _derive_table6(evaluation_status)
     table_manifest = {
         "schema_version": "1.0",
         "tables": {
             "table1_components": {"status": "COMPLETE"},
             "table2_kimore_mapping": {"status": "COMPLETE"},
             "table3_protocol": {"status": "COMPLETE"},
-            "table4_robustness": {"status": "SYNTHETIC_ONLY"},
-            "table5_runtime_benchmark": {"status": "PENDING_DATA"},
-            "table6_fps_sensitivity": {"status": "SYNTHETIC_ONLY"},
+            "table4_robustness": {"status": table4},
+            "table5_runtime_benchmark": {"status": table5},
+            "table6_fps_sensitivity": {"status": table6},
         },
-        "note": "Numeric tables marked SYNTHETIC_ONLY/PENDING_DATA are not empirical results.",
+        "note": "Numeric table statuses are data-driven; SYNTHETIC_ONLY/PENDING_DATA are not empirical results.",
     }
+    figure_d = "EMPIRICAL_COMPLETE" if table5 == "EMPIRICAL_COMPLETE" else "PENDING_DATA"
     figure_manifest = {
         "schema_version": "1.0",
         "figures": {
             "A": "PENDING_DATA",
-            "B": "SYNTHETIC_ONLY",
-            "C": "SYNTHETIC_ONLY",
-            "D": "PENDING_DATA",
+            "B": table6,
+            "C": "SYNTHETIC_ONLY" if _status_cell(evaluation_status or {}, "missingness_sensitivity_synthetic", "COMPLETE") == "COMPLETE" else "PENDING_DATA",
+            "D": figure_d,
             "E": "SYNTHETIC_ONLY",
         },
         "note": "Figures are data-gated; synthetic-only figures are software validation, not empirical.",
@@ -122,6 +149,7 @@ def generate(output_dir: Path, evaluation_status_path: Optional[Path]) -> dict:
             "architecture_summary.md", "method_summary.md", "claim_status.md",
             "results_status.md", "table_manifest.json", "figure_manifest.json",
         ],
+        "table_statuses": {"table4": table4, "table5": table5, "table6": table6},
     }
 
 
