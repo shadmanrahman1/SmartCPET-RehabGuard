@@ -141,7 +141,6 @@ class CameraWorker(QObject):
     metrics_ready = pyqtSignal(dict)
     status_ready  = pyqtSignal(str)
     evidence_ready = pyqtSignal(dict)
-    explanation_ready = pyqtSignal(dict)
 
     def __init__(self, camera_source: Any) -> None:
         super().__init__()

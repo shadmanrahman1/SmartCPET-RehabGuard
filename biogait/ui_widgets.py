@@ -240,6 +240,8 @@ class ResearchEvidencePanel(QFrame):
     # Emitted when the user presses "Generate Evidence Summary". A bounded
     # explainer is run asynchronously OFF the capture thread.
     generate_summary_requested = pyqtSignal()
+    # Emitted when the user presses "Export Research Session".
+    export_session_requested = pyqtSignal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -321,11 +323,27 @@ class ResearchEvidencePanel(QFrame):
         self._gen_button = gen_btn
         lay.addWidget(gen_btn)
 
+        # Export Research Session (explicit user action).
+        export_btn = QPushButton("Export Research Session")
+        export_btn.setStyleSheet(
+            f"QPushButton {{ background:{TEXT_SEC}; color:{BG_CARD}; "
+            f"border:none; padding:6px 10px; border-radius:6px; }}"
+        )
+        export_btn.clicked.connect(self.export_session_requested.emit)
+        lay.addWidget(export_btn)
+        self._export_message = QLabel("")
+        self._export_message.setWordWrap(True)
+        self._export_message.setStyleSheet(f"color:{TEXT_SEC}; font-size:9px;")
+        lay.addWidget(self._export_message)
+
     def set_evidence_summary(self, text: str) -> None:
         self._summary_label.setText(text or "No summary available.")
 
     def set_generate_enabled(self, enabled: bool) -> None:
         self._gen_button.setEnabled(enabled)
+
+    def set_export_message(self, text: str) -> None:
+        self._export_message.setText(text)
 
     def update_research_evidence(self, payload: dict) -> None:
         def _fmt(name: str, value, digits: int = 1) -> str:
