@@ -267,12 +267,15 @@ class MainWindow(QMainWindow):
     def _generate_evidence_summary(self) -> None:
         """Run a bounded explanation asynchronously OFF the capture thread.
 
-        Uses only structured evidence; never raw frames or identity. Before the
-        first processed evidence frame the button is disabled and no request is
-        made. The validated summary STRING is shown; an audit dict is never
-        routed through the QLabel text slot.
+        Uses only structured evidence; never raw frames or identity. Only one
+        explanation request may be active at a time; the button stays disabled
+        until the thread has ACTUALLY finished (built-in ``finished`` signal).
+        Cleanup (deleteLater + clearing the reference) happens only after
+        ``finished`` fires, never inside the result callback.
         """
         panel = self._dashboard._research
+        if getattr(self, "_explanation_thread", None) is not None and self._explanation_thread.isRunning():
+            return  # one active request only
         if not self._evidence_has_content():
             panel.set_generate_enabled(False)
             panel.set_evidence_summary("NO_EVIDENCE_AVAILABLE")
@@ -281,27 +284,23 @@ class MainWindow(QMainWindow):
         panel.set_generate_enabled(False)
         panel.set_evidence_summary("Generating evidence summary...")
 
+        runner = ExplanationWorker(evidence)
+
         def _on_result(audit: dict) -> None:
-            # Extract the validated summary string; never pass a dict to a text
-            # label. Biography owns the safety note; we show only the summary.
             output = audit.get("output") or {}
             summary = str(output.get("summary") or "No summary.")
             panel.set_evidence_summary(summary)
+
+        def _on_done() -> None:
+            # Thread has finished; safe to clean up now.
             panel.set_generate_enabled(True)
-            # Clean up the finished thread.
-            if getattr(runner, "finished_ok", None) is not None:
-                pass
             runner.deleteLater()
+            self._explanation_thread = None
 
-        def _on_finished(ok: bool) -> None:
-            panel.set_generate_enabled(True)
-
-        runner = ExplanationWorker(evidence)
-        # Track the single active thread for lifecycle cleanup on close.
-        self._explanation_thread = runner
         runner.result_ready.connect(_on_result)
-        runner.finished_ok.connect(_on_finished)
-        runner.request_explanation()
+        runner.finished.connect(_on_done)
+        self._explanation_thread = runner
+        runner.start()
 
     def _export_research_session(self) -> None:
         """Export the current retained/full research session to a user file."""
@@ -325,13 +324,16 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         # Safely stop the camera thread and any in-flight explanation thread.
+        # QThread.quit() cannot cancel a blocking urllib run(), so we wait a
+        # bounded window (remote timeout + margin) before window destruction.
         self._worker.stop()
         self._thread.quit()
         self._thread.wait(3000)
         runner = getattr(self, "_explanation_thread", None)
-        if runner is not None and runner.isRunning():
-            runner.quit()
-            runner.wait(2000)
+        if runner is not None:
+            runner.wait(11_000)  # remote timeout (<=8s) + margin
+            runner.deleteLater()
+            self._explanation_thread = None
         event.accept()
 
 

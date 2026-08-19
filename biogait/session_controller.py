@@ -154,30 +154,40 @@ class BioGaitSessionController:
     ) -> dict:
         """Export structured research evidence as a versioned envelope.
 
-        ``export_scope="full"`` exports the full session record (may exceed 300
-        frames and is unbounded by default); ``export_scope="rolling"`` exports
-        only the last ``max_frames`` display window. No raw frames/images are
-        exported. The snapshot is copied under the lock; serialization happens
-        in the caller.
+        ``export_scope="full"`` exports the full session record (unbounded,
+        structured FrameEvidence; may exceed 300 frames);
+        ``export_scope="rolling"`` exports only the last ``max_frames`` display
+        window. Any other value raises ``ValueError``.
+
+        ``quality_summary`` always describes the exported scope's frames;
+        ``rolling_quality_summary`` always describes the rolling window. Full
+        aligned arrays retain all structured research streams (knee angles +
+        selected control factors). No raw images/video are exported. The
+        snapshot is copied under the lock; serialization happens in the caller.
         """
+        if export_scope not in ("full", "rolling"):
+            raise ValueError(f"export_scope must be 'full' or 'rolling', got {export_scope!r}")
+
         with self._lock:
             envelope = session_header(
                 data_origin=data_origin, processing_mode=processing_mode, exercise=exercise
             )
             label = session_label or self._session_label
+            rolling_arrays = self._rolling.aligned_arrays()
             if export_scope == "rolling":
-                snapshot_arrays = self._rolling.aligned_arrays()
+                snapshot_arrays = rolling_arrays
                 exported = self._rolling.retained_frames
-                rolled = True
+                scope_quality = self._rolling_quality_summary()
             else:
                 snapshot_arrays = self._arrays_from_record(self._session_record)
                 exported = len(self._session_record)
-                rolled = False
+                scope_quality = self._record_quality_summary(self._session_record)
+
             export = {
                 **envelope,
                 "session_state": self._state,
                 "session_scope": export_scope,
-                "session_persisted_rolling": rolled,
+                "session_persisted_rolling": export_scope == "rolling",
                 "session_truncated": self._session_truncated,
                 "session_frame_limit": self._max_session_frames,
                 "exported_frame_count": exported,
@@ -186,7 +196,10 @@ class BioGaitSessionController:
                 "elapsed_seconds": (
                     round(self._elapsed_locked(), 4) if self._elapsed_locked() is not None else None
                 ),
-                "quality_summary": self._rolling_quality_summary(),
+                # quality_summary describes the EXPORTED scope's frames.
+                "quality_summary": scope_quality,
+                # rolling_quality_summary always describes the rolling window.
+                "rolling_quality_summary": self._rolling_quality_summary(),
                 "aligned_arrays": snapshot_arrays,
                 "retained_availability_rate": (
                     round(self._rolling.retained_availability_rate, 4)
@@ -203,31 +216,50 @@ class BioGaitSessionController:
         available = self._rolling.retained_available_count
         total = self._rolling.retained_frames
         return {
-            "retained_available_frames": available,
-            "retained_unavailable_frames": self._rolling.retained_unavailable_count,
-            "retained_total_frames": total,
-            "retained_availability_rate": (
+            "available_frames": available,
+            "unavailable_frames": self._rolling.retained_unavailable_count,
+            "total_frames": total,
+            "availability_rate": (
                 round(available / total, 4) if total else None
             ),
         }
 
     @staticmethod
+    def _record_quality_summary(record: list[dict]) -> dict:
+        available = sum(1 for ev in record if ev.get("quality", {}).get("available"))
+        total = len(record)
+        return {
+            "available_frames": available,
+            "unavailable_frames": total - available,
+            "total_frames": total,
+            "availability_rate": round(available / total, 4) if total else None,
+        }
+
+    @staticmethod
     def _arrays_from_record(record: list[dict]) -> dict:
-        """Build aligned arrays from the full structured session record."""
+        """Aligned structured research arrays from the full session record.
+
+        Mirrors ``SessionAccumulator.aligned_arrays()``: knee angles plus all
+        selected control-factor streams. No raw images/video are included.
+        """
+        from session_analysis import SELECTED_CONTROL_FACTOR_STREAMS
+
         arrays: dict[str, list[Any]] = {
             "timestamps_s": [],
             "left_knee_sagittal_deg": [],
             "right_knee_sagittal_deg": [],
         }
+        for name in SELECTED_CONTROL_FACTOR_STREAMS:
+            arrays[name] = []
         for ev in record:
             arrays["timestamps_s"].append(float(ev["timestamp_seconds"]))
             po = ev.get("primary_outcomes") or {}
-            arrays["left_knee_sagittal_deg"].append(
-                _clean(po.get("left_knee_sagittal_deg"))
-            )
-            arrays["right_knee_sagittal_deg"].append(
-                _clean(po.get("right_knee_sagittal_deg"))
-            )
+            arrays["left_knee_sagittal_deg"].append(_clean(po.get("left_knee_sagittal_deg")))
+            arrays["right_knee_sagittal_deg"].append(_clean(po.get("right_knee_sagittal_deg")))
+            cf = ev.get("control_factors") or {}
+            for name in SELECTED_CONTROL_FACTOR_STREAMS:
+                raw = cf.get(name)
+                arrays[name].append(_clean(raw))
         return arrays
 
 

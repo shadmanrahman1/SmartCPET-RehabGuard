@@ -319,7 +319,7 @@ class ResearchEvidencePanel(QFrame):
             f"border:none; padding:6px 10px; border-radius:6px; }}"
         )
         gen_btn.clicked.connect(self.generate_summary_requested.emit)
-        gen_btn.setEnabled(True)
+        gen_btn.setEnabled(False)  # disabled until the first research evidence
         self._gen_button = gen_btn
         lay.addWidget(gen_btn)
 
@@ -353,6 +353,11 @@ class ResearchEvidencePanel(QFrame):
             if isinstance(value, float):
                 return f"{value:.{digits}f}{unit}"
             return f"{value}{unit}"
+
+        # Enable the evidence-summary action only once real research evidence
+        # exists (never before the first processed frame).
+        if (payload.get("quality") or payload.get("primary_outcomes")):
+            self._gen_button.setEnabled(True)
 
         self._rows["L sagittal knee"].setText(
             _fmt("L sagittal knee", payload.get("left_knee_sagittal_deg"))

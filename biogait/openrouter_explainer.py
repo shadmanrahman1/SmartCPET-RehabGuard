@@ -127,7 +127,9 @@ class OpenRouterExplainer:
                 "(OpenRouter is the only remote provider)"
             )
         self.base_url = base
-        self.timeout = float(timeout)
+        # Bounded remote timeout (<=8 s) so a blocking request can never hang the
+        # GUI close path beyond timeout + a small margin.
+        self.timeout = min(8.0, float(timeout)) if float(timeout) > 0 else 8.0
         # Remote is only attempted when explicitly configured with a key+model.
         self._remote_ready = (
             self.mode == "openrouter"

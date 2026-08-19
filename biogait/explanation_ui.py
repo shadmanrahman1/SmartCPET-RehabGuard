@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from explanation_schema import build_input
 from openrouter_explainer import OpenRouterExplainer, make_explainer
 
 
@@ -36,7 +35,8 @@ def evidence_from_payload(payload: dict) -> dict:
             "left_knee_rom_deg": payload.get("rolling_left_knee_rom_deg"),
             "right_knee_rom_deg": payload.get("rolling_right_knee_rom_deg"),
         },
-        "data_origin": payload.get("data_origin", "REAL_VIDEO_MEDIAPIPE"),
+        # Empty/unknown payloads are NEVER promoted to a real data origin.
+        "data_origin": payload.get("data_origin", "UNKNOWN_UNVALIDATED"),
         "processing_mode": payload.get("processing_mode", "live_mediapipe"),
     }
     # Only keep populated fields.
@@ -44,6 +44,12 @@ def evidence_from_payload(payload: dict) -> dict:
 
 
 def run_explanation(evidence: dict, explainer: Optional[OpenRouterExplainer] = None, force: bool = False) -> dict:
-    """Run the bounded explainer on structured evidence; returns an audit dict."""
+    """Run the bounded explainer on ORIGINAL structured evidence; returns an audit.
+
+    The original evidence is passed to the explainer UNCHANGED. The
+    OpenRouterExplainer is the single provider boundary owner: it detects
+    sensitive nested fields, builds/prunes the whitelisted provider payload,
+    and never makes a remote call when sensitive fields are present.
+    """
     explainer = explainer or make_explainer()
-    return explainer.explain(build_input(evidence), force=force)
+    return explainer.explain(evidence, force=force)

@@ -155,6 +155,32 @@ class SessionExportScopeTests(unittest.TestCase):
         self.assertEqual(rolling["exported_frame_count"], 300)
         self.assertEqual(len(rolling["aligned_arrays"]["timestamps_s"]), 300)
 
+    def test_full_vs_rolling_control_stream_lengths_and_quality(self):
+        ctrl = BioGaitSessionController()
+        ctrl.start()
+        for i in range(350):
+            ctrl.receive_frame_evidence(self._ev(i))
+        full = ctrl.export_research_session(export_scope="full")
+        rolling = ctrl.export_research_session(export_scope="rolling")
+        # All full streams (including control factors) have length 350.
+        for name in ("timestamps_s", "left_knee_sagittal_deg", "knee_euclidean_3d_m"):
+            self.assertEqual(len(full["aligned_arrays"][name]), 350, name)
+        # Rolling streams length 300.
+        for name in ("timestamps_s", "left_knee_sagittal_deg", "knee_euclidean_3d_m"):
+            self.assertEqual(len(rolling["aligned_arrays"][name]), 300, name)
+        # quality_summary describes the exported scope; rolling_quality_summary
+        # always describes the rolling window.
+        self.assertEqual(full["quality_summary"]["total_frames"], 350)
+        self.assertEqual(rolling["quality_summary"]["total_frames"], 300)
+        self.assertEqual(full["rolling_quality_summary"]["total_frames"], 300)
+        self.assertEqual(rolling["rolling_quality_summary"]["total_frames"], 300)
+
+    def test_invalid_export_scope_rejected(self):
+        ctrl = BioGaitSessionController()
+        ctrl.start()
+        with self.assertRaises(ValueError):
+            ctrl.export_research_session(export_scope="bogus")
+
     def test_explicit_limit_marks_truncation(self):
         ctrl = BioGaitSessionController(max_session_frames=5)
         ctrl.start()
