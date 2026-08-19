@@ -1,0 +1,48 @@
+# BioGait evaluation tests (Sprint B).
+#
+# Runs the lightweight automated BioGait test suite in CI.
+#
+# The automated tests do NOT require cv2/mediapipe/PyQt5 (they are stubbed at
+# module load inside the test files), do NOT download any pose model or
+# biomedical dataset, never launch a camera, and do NOT run CPET. Only numpy
+# and scipy are needed to import the research modules under test.
+#
+# No secrets are used. No network model/dataset download occurs.
+name: BioGait tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    paths:
+      - "biogait/**"
+      - "experiments/biogait/**"
+      - "tests/**"
+      - ".github/workflows/biogait-tests.yml"
+
+jobs:
+  biogait-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r biogait/requirements-tests.txt
+
+      - name: Compile BioGait
+        run: python -m compileall biogait
+
+      - name: Compile BioGait experiments
+        run: python -m compileall experiments/biogait
+
+      - name: Run BioGait unit tests
+        run: python -m unittest discover -s tests -p "test_biogait_*.py"
