@@ -37,13 +37,17 @@ def _install_stubs():
     sys.modules.setdefault("PyQt5", types.SimpleNamespace())
     sys.modules.setdefault(
         "PyQt5.QtCore",
-        types.SimpleNamespace(QObject=object, pyqtSignal=lambda *a, **k: None),
+        types.SimpleNamespace(QObject=object, QThread=object, pyqtSignal=lambda *a, **k: None),
     )
     sys.modules.setdefault("PyQt5.QtGui", types.SimpleNamespace(QImage=object))
-    sys.modules.setdefault("mediapipe", types.SimpleNamespace())
-    sys.modules.setdefault("mediapipe.tasks", types.SimpleNamespace())
-    sys.modules.setdefault("mediapipe.tasks.python", types.SimpleNamespace())
-    sys.modules.setdefault("mediapipe.tasks.python.vision", types.SimpleNamespace())
+    mp_python = types.SimpleNamespace()
+    mp_vision = types.SimpleNamespace()
+    mp_tasks = types.SimpleNamespace(python=mp_python)
+    mp = types.SimpleNamespace(tasks=mp_tasks, Image=lambda *a, **k: object(), ImageFormat=types.SimpleNamespace(SRGB=0))
+    sys.modules.setdefault("mediapipe", mp)
+    sys.modules.setdefault("mediapipe.tasks", mp_tasks)
+    sys.modules.setdefault("mediapipe.tasks.python", mp_python)
+    sys.modules.setdefault("mediapipe.tasks.python.vision", mp_vision)
 
 
 _install_stubs()

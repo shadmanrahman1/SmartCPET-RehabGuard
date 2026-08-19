@@ -1,0 +1,36 @@
+{
+  "title": "BioGait Architecture Manifest",
+  "schema_version": "1.0",
+  "module": "biogait",
+  "note": "CPET is OUTSIDE active Sprint-C architecture scope; no CPET node is included.",
+  "nodes": [
+    {"id": "rgb_source", "label": "RGB source (live camera / offline local video)", "provenance": null},
+    {"id": "pose_landmarker", "label": "PoseLandmarker Lite", "provenance": "ENGINEERING_ADAPTED"},
+    {"id": "legacy_metrics", "label": "Legacy rule-based screening metrics (metrics.py)", "provenance": "LEGACY_EXPERIMENTAL"},
+    {"id": "world_evidence", "label": "World-landmark evidence (evidence_features.py)", "provenance": "REFERENCE_DERIVED / ENGINEERING_ADAPTED / DESCRIPTIVE"},
+    {"id": "session_accumulator", "label": "Session accumulator / session controller", "provenance": "DESCRIPTIVE"},
+    {"id": "reference_analysis", "label": "Source-aligned KIMORE reference analysis", "provenance": "REFERENCE_DERIVED"},
+    {"id": "adapted_analysis", "label": "ACTUAL-fps adapted analysis", "provenance": "ENGINEERING_ADAPTED"},
+    {"id": "research_panel", "label": "Live research panel (Qt)", "provenance": "DESCRIPTIVE"},
+    {"id": "evidence_export", "label": "Research-session export", "provenance": null},
+    {"id": "template_explainer", "label": "Deterministic template explainer", "provenance": "DESCRIPTIVE"},
+    {"id": "openrouter_explainer", "label": "Optional OpenRouter remote explainer", "provenance": "OPTIONAL_REMOTE"},
+    {"id": "research_report", "label": "Offline research report", "provenance": "DESCRIPTIVE"}
+  ],
+  "edges": [
+    {"from": "rgb_source", "to": "pose_landmarker"},
+    {"from": "pose_landmarker", "to": "legacy_metrics"},
+    {"from": "pose_landmarker", "to": "world_evidence"},
+    {"from": "world_evidence", "to": "session_accumulator"},
+    {"from": "session_accumulator", "to": "reference_analysis"},
+    {"from": "session_accumulator", "to": "adapted_analysis"},
+    {"from": "session_accumulator", "to": "research_panel"},
+    {"from": "session_accumulator", "to": "evidence_export"},
+    {"from": "reference_analysis", "to": "research_panel"},
+    {"from": "adapted_analysis", "to": "research_panel"},
+    {"from": "evidence_export", "to": "research_report"},
+    {"from": "session_accumulator", "to": "template_explainer"},
+    {"from": "evidence_export", "to": "template_explainer"},
+    {"from": "template_explainer", "to": "openrouter_explainer"}
+  ]
+}

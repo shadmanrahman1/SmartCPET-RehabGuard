@@ -103,5 +103,41 @@ class SplitTests(unittest.TestCase):
         subject_disjoint_split(m, test_frac=0.2, val_frac=0.2, seed=0)
 
 
+class GroupStratifiedSplitTests(unittest.TestCase):
+    """C0.4: group-stratified allocation gives real per-fold representation."""
+
+    def _two_groups(self, n_a=12, n_b=12):
+        seqs = []
+        for i in range(n_a):
+            seqs.append({"dataset_group": "A", "dataset_subject_key": opaque_key("A", str(i)),
+                         "exercise": "ex5", "sequence_key": opaque_key("a", str(i))})
+        for i in range(n_b):
+            seqs.append({"dataset_group": "B", "dataset_subject_key": opaque_key("B", str(i)),
+                         "exercise": "ex5", "sequence_key": opaque_key("b", str(i))})
+        return build_manifest(seqs, seed=0)
+
+    def test_each_fold_represents_both_groups(self):
+        m = self._two_groups()
+        split = subject_disjoint_split(m, test_frac=0.25, val_frac=0.25, seed=1, stratify_by="group")
+        self.assertFalse(subject_overlap(split))
+        for fold_name in ("train", "val", "test"):
+            groups = {e["dataset_group"] for e in split[fold_name]}
+            self.assertEqual(groups, {"A", "B"}, fold_name)
+
+    def test_subject_disjoint_under_stratification(self):
+        m = self._two_groups()
+        split = subject_disjoint_split(m, test_frac=0.2, val_frac=0.2, seed=3, stratify_by="group")
+        self.assertFalse(subject_overlap(split))
+
+    def test_deterministic_with_seed(self):
+        m = self._two_groups()
+        s1 = subject_disjoint_split(m, test_frac=0.25, val_frac=0.25, seed=9, stratify_by="group")
+        s2 = subject_disjoint_split(m, test_frac=0.25, val_frac=0.25, seed=9, stratify_by="group")
+        self.assertEqual(
+            [sorted(e["sequence_key"] for e in f) for f in (s1["train"], s1["val"], s1["test"])],
+            [sorted(e["sequence_key"] for e in f) for f in (s2["train"], s2["val"], s2["test"])],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

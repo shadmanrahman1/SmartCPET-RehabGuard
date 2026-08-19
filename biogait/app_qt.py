@@ -6,16 +6,27 @@ Run:  python app_qt.py
 """
 from __future__ import annotations
 
+import json
 import sys
 import time
+from pathlib import Path
 
 from PyQt5.QtCore import Qt, QThread, QTimer
 from PyQt5.QtGui import QColor, QFont, QPixmap
 from PyQt5.QtWidgets import (
-    QApplication, QFrame, QHBoxLayout, QLabel,
+    QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel,
     QMainWindow, QScrollArea, QSizePolicy,
     QVBoxLayout, QWidget,
 )
+
+
+def _atomic_write_json(path: Path, obj) -> None:
+    """Write JSON atomically with allow_nan=False (no identity/path leaks)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(obj, indent=2, ensure_ascii=False, allow_nan=False)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
 
 import config
 from ui_widgets import (
@@ -23,7 +34,8 @@ from ui_widgets import (
     STATUS_COLORS, TEXT_PRI, TEXT_SEC,
     MetricCard, ReasonsBox, ResearchEvidencePanel, RiskGauge, SparklineChart,
 )
-from ui_worker import CameraWorker
+from ui_worker import CameraWorker, ExplanationWorker
+from explanation_ui import evidence_from_payload
 
 
 # ── Video Panel ───────────────────────────────────────────────────────────────
@@ -238,13 +250,90 @@ class MainWindow(QMainWindow):
         self._worker.metrics_ready.connect(self._dashboard.update_metrics)
         self._worker.status_ready.connect(self._video.update_status)
         self._worker.evidence_ready.connect(self._dashboard.update_research_evidence)
+        self._dashboard._research.generate_summary_requested.connect(
+            self._generate_evidence_summary
+        )
+        self._dashboard._research.export_session_requested.connect(
+            self._export_research_session
+        )
 
         self._thread.start()
 
+    def _evidence_has_content(self) -> bool:
+        payload = self._worker.latest_evidence_payload()
+        # Require at least one processed evidence frame before offering summaries.
+        return bool(payload and payload.get("quality") or payload.get("primary_outcomes"))
+
+    def _generate_evidence_summary(self) -> None:
+        """Run a bounded explanation asynchronously OFF the capture thread.
+
+        Uses only structured evidence; never raw frames or identity. Only one
+        explanation request may be active at a time; the button stays disabled
+        until the thread has ACTUALLY finished (built-in ``finished`` signal).
+        Cleanup (deleteLater + clearing the reference) happens only after
+        ``finished`` fires, never inside the result callback.
+        """
+        panel = self._dashboard._research
+        if getattr(self, "_explanation_thread", None) is not None and self._explanation_thread.isRunning():
+            return  # one active request only
+        if not self._evidence_has_content():
+            panel.set_generate_enabled(False)
+            panel.set_evidence_summary("NO_EVIDENCE_AVAILABLE")
+            return
+        evidence = evidence_from_payload(self._worker.latest_evidence_payload())
+        panel.set_generate_enabled(False)
+        panel.set_evidence_summary("Generating evidence summary...")
+
+        runner = ExplanationWorker(evidence)
+
+        def _on_result(audit: dict) -> None:
+            output = audit.get("output") or {}
+            summary = str(output.get("summary") or "No summary.")
+            panel.set_evidence_summary(summary)
+
+        def _on_done() -> None:
+            # Thread has finished; safe to clean up now.
+            panel.set_generate_enabled(True)
+            runner.deleteLater()
+            self._explanation_thread = None
+
+        runner.result_ready.connect(_on_result)
+        runner.finished.connect(_on_done)
+        self._explanation_thread = runner
+        runner.start()
+
+    def _export_research_session(self) -> None:
+        """Export the current retained/full research session to a user file."""
+        from PyQt5.QtWidgets import QFileDialog
+
+        panel = self._dashboard._research
+        try:
+            default_name = "biogait_research_session.json"
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Export Research Session", default_name,
+                "BioGait session JSON (*.json)",
+            )
+            if not path:
+                panel.set_export_message("Export cancelled.")
+                return
+            export = self._worker.export_research_session()
+            _atomic_write_json(Path(path), export)
+            panel.set_export_message(f"Exported: {Path(path).name}")
+        except Exception as exc:  # noqa: BLE001 - show neutral failure text
+            panel.set_export_message("Export failed.")
+
     def closeEvent(self, event) -> None:  # noqa: N802
+        # Safely stop the camera thread and any in-flight explanation thread.
+        # QThread.quit() cannot cancel a blocking urllib run(), so we wait a
+        # bounded window (remote timeout + margin) before window destruction.
         self._worker.stop()
         self._thread.quit()
         self._thread.wait(3000)
+        runner = getattr(self, "_explanation_thread", None)
+        if runner is not None:
+            runner.wait(11_000)  # remote timeout (<=8s) + margin
+            runner.deleteLater()
+            self._explanation_thread = None
         event.accept()
 
 

@@ -23,7 +23,18 @@
     "paper_figures": "PENDING",
     "real_video_smoke": "PENDING",
     "runtime_benchmark_real_video": "PENDING",
-    "mediapipe_vs_kinect_validation": "DEFERRED"
+    "mediapipe_vs_kinect_validation": "DEFERRED",
+    "sprint_c": {
+      "evidence_schema": "COMPLETE",
+      "session_controller": "COMPLETE",
+      "template_explainer": "COMPLETE",
+      "openrouter_explainer": "IMPLEMENTED_REAL_CALL_PENDING",
+      "research_report": "COMPLETE",
+      "conference_artifacts": "COMPLETE",
+      "release_check": "COMPLETE",
+      "real_video_orchestrator": "PENDING_REAL_VIDEO",
+      "real_kimore_orchestrator": "PENDING_REAL_DATA"
+    }
   },
   "notes": {
     "unit_tests": "Automated BioGait test suite passes (compileall + unittest).",

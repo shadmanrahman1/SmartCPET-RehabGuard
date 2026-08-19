@@ -379,6 +379,7 @@ def _install_ui_worker_stubs():
     real hardware, model download, or GUI display is involved."""
     qt_core = _types.ModuleType("PyQt5.QtCore")
     qt_core.QObject = type("QObjectStub", (), {})
+    qt_core.QThread = type("QThreadStub", (), {})
     qt_core.pyqtSignal = lambda *a, **k: mock.MagicMock()
     qt_gui = _types.ModuleType("PyQt5.QtGui")
     qt_gui.QImage = mock.MagicMock()
@@ -470,6 +471,22 @@ class WorkerStreamOwnershipTests(unittest.TestCase):
         self.assertNotIn("TRACKING", emitted)
         self.assertIn("RECONNECTING", emitted)
         self.assertIn("CONNECTING", emitted)
+
+
+class ExplanationWorkerRunTests(unittest.TestCase):
+    """ExplanationWorker emits its result/finished signals on a (template) run."""
+
+    def test_success_run_emits_result(self):
+        from ui_worker import ExplanationWorker
+
+        worker = object.__new__(ExplanationWorker)  # QThread stub has no __init__
+        worker._evidence = {}
+        worker._force = False
+        worker.result_ready = mock.MagicMock()
+        worker.finished_ok = mock.MagicMock()
+        worker.run()  # run() directly exercises the same path
+        worker.result_ready.emit.assert_called_once()
+        worker.finished_ok.emit.assert_called_once_with(True)
 
 
 if __name__ == "__main__":

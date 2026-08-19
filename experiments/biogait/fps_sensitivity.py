@@ -197,12 +197,65 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--output", default=None, help="JSON output path")
     p.add_argument("--n-frames", type=int, default=600)
+    p.add_argument("--sequence-json", default=None,
+                   help="run on a REAL normalized KIMORE sequence (derives knee-angle streams)")
     p.add_argument("--print", action="store_true", help="print result JSON")
     return p
 
 
+def _status_result(status: str, output: Optional[Path], note: str) -> dict:
+    result = {
+        "experiment": "fps_sensitivity",
+        "schema_version": "1.0",
+        "status": status,
+        "note": note,
+        "rows": [],
+    }
+    if output is not None:
+        atomic_json_write(output, result)
+        print(f"[fps_sensitivity] wrote {output}")
+    return result
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
+    import json
+
+    if args.sequence_json:
+        from common import load_json
+        seq = load_json(Path(args.sequence_json))
+        if not isinstance(seq, dict) or not seq.get("joints"):
+            result = _status_result("PENDING_VALID_30HZ_ANCHOR", Path(args.output) if args.output else None,
+                                    "sequence-json is not a normalized {joints:...} object")
+            print(json.dumps(result, indent=2, allow_nan=False))
+            return 1 if False else 0
+        fs = seq.get("sampling_rate_hz")
+        if not isinstance(fs, (int, float)) or not math.isclose(float(fs), 30.0, rel_tol=0.0, abs_tol=1e-6):
+            result = _status_result(
+                "PENDING_VALID_30HZ_ANCHOR",
+                Path(args.output) if args.output else None,
+                "A valid 30 Hz anchor is required for reference-aligned FPS "
+                "sensitivity; a non-30 Hz source is not resampled into a fake "
+                "REFERENCE_DERIVED anchor.",
+            )
+            print(json.dumps(result, indent=2, allow_nan=False))
+            return 0
+        left = angle_sequence_from_knee(seq["joints"], "left_knee")
+        right = angle_sequence_from_knee(seq["joints"], "right_knee")
+        origin = "UNKNOWN_UNVALIDATED"
+        raw_origin = str(seq.get("data_origin", ""))
+        if raw_origin == "REAL_KIMORE_NATIVE_SKELETON":
+            origin = "REAL_KIMORE_NATIVE_SKELETON"
+        elif raw_origin == "SYNTHETIC_FIXTURE":
+            origin = "SYNTHETIC_FIXTURE"
+        result = fps_sensitivity(left, right, src_fs=30.0, data_origin=origin)
+        if args.print or args.output is None:
+            print(json.dumps(result, indent=2, allow_nan=False))
+        if args.output:
+            atomic_json_write(Path(args.output), result)
+            print(f"[fps_sensitivity] wrote {args.output}")
+        return 0
+
     from kimore_adapter import synthetic_ex5_sequence
 
     seq = synthetic_ex5_sequence(args.n_frames, 30.0, seed=0)
@@ -212,7 +265,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         left, right, src_fs=30.0, data_origin="SYNTHETIC_FIXTURE"
     )
     if args.print or args.output is None:
-        import json
         print(json.dumps(result, indent=2, allow_nan=False))
     if args.output:
         atomic_json_write(Path(args.output), result)

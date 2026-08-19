@@ -106,6 +106,35 @@ class EvaluatorContractTests(unittest.TestCase):
         self.assertIn("load", names)
         self.assertIn("sequence_json", names)
 
+    def test_mixed_origin_manifest_per_sequence(self):
+        # C0.3: one REAL sequence in a manifest must NOT upgrade another
+        # UNKNOWN/SYNTHETIC sequence to REAL.
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from evaluate_kimore_ex5 import evaluate_sequences
+
+        seq1 = synthetic_ex5_sequence(40, 30.0, seed=0)
+        seq1["data_origin"] = "REAL_KIMORE_NATIVE_SKELETON"
+        seq2 = synthetic_ex5_sequence(40, 30.0, seed=1)
+        seq2["data_origin"] = "SYNTHETIC_FIXTURE"
+        seq3 = synthetic_ex5_sequence(40, 30.0, seed=2)
+        seq3.pop("data_origin", None)
+        results = evaluate_sequences([seq1, seq2, seq3])
+        self.assertEqual(results[0]["data_origin"], "REAL_KIMORE_NATIVE_SKELETON")
+        self.assertEqual(results[1]["data_origin"], "SYNTHETIC_FIXTURE")
+        self.assertEqual(results[2]["data_origin"], "UNKNOWN_UNVALIDATED")
+
+    def test_invalid_origin_coerced_to_unknown(self):
+        from evaluate_kimore_ex5 import evaluate_sequence
+        from kimore_adapter import synthetic_ex5_sequence
+
+        seq = synthetic_ex5_sequence(40, 30.0, seed=0)
+        seq["data_origin"] = "SOMETHING_BOGUS"
+        result = evaluate_sequence(seq)
+        self.assertEqual(result["data_origin"], "UNKNOWN_UNVALIDATED")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -172,5 +172,25 @@ class BenchmarkBatchTests(unittest.TestCase):
         self.assertEqual(result["summary"]["REAL_VIDEO_BENCHMARK"], "PENDING")
 
 
+    def test_single_video_produces_compatible_batch(self):
+        import json as _json
+        import shutil
+        import tempfile
+
+        self._patch_bv(_make_bv())
+        tmp = Path(tempfile.mkdtemp(prefix="bench_single_"))
+        try:
+            video = Path(tmp) / "clip.mp4"
+            video.write_bytes(b"\x00")
+            out = Path(tmp) / "out"
+            result = benchmark_batch.run_benchmark_single(video, out, None)
+            self.assertEqual(result["summary"]["REAL_VIDEO_BENCHMARK"], "COMPLETE")
+            batch = _json.loads((out / "benchmark_batch.json").read_text(encoding="utf-8"))
+            self.assertEqual(batch["summary"]["REAL_VIDEO_BENCHMARK"], "COMPLETE")
+            self.assertNotIn("clip.mp4", _json.dumps(batch))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -394,16 +394,31 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--output", default=None, help="write neutral JSON output")
     p.add_argument("--synthetic", action="store_true", help="emit a synthetic fixture instead of real data")
     p.add_argument("--n-frames", type=int, default=600)
-    p.add_argument("--fs", type=float, default=30.0)
+    p.add_argument("--fs", type=float, default=None,
+                   help="explicit sampling rate for a loaded sequence (never silently 30 Hz)")
     p.add_argument("--seed", type=int, default=0)
     return p
+
+
+def _valid_fs(value) -> Optional[float]:
+    import math
+    if value is None:
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) and f > 0 else None
 
 
 def main(argv: Optional[list[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
 
     if args.synthetic:
-        seq = synthetic_ex5_sequence(args.n_frames, args.fs, args.seed)
+        # Synthetic fixtures intentionally specify a source rate; if omitted,
+        # the fixture itself is generated at 30.0.
+        fs = _valid_fs(args.fs) if args.fs is not None else 30.0
+        seq = synthetic_ex5_sequence(args.n_frames, fs, args.seed)
         seq["validation_status"] = "SYNTHETIC_FIXTURE_NOT_REAL_DATA"
         print(json.dumps(seq, indent=2, allow_nan=False))
         if args.output:
@@ -425,8 +440,16 @@ def main(argv: Optional[list[str]] = None) -> int:
         if joints is None:
             print("[kimore_adapter] ERROR: could not parse joint data")
             return 1
-        seq = normalized_ex5_sequence(joints, sequence_key=opaque_key(args.load))
-        seq["validation_status"] = REAL_KIMORE_DATASET_VALIDATION
+        fs = _valid_fs(args.fs)  # None if not supplied; never silently 30 Hz
+        seq = normalized_ex5_sequence(
+            joints,
+            sequence_key=opaque_key(args.load),
+            sampling_rate_hz=fs if fs is not None else None,
+        )
+        # Supplied-sequence execution provenance (not global dataset clinical
+        # validation).
+        seq["data_origin"] = "REAL_KIMORE_NATIVE_SKELETON"
+        seq["validation_status"] = "PARSED_SEQUENCE_VALIDATED"
         print(json.dumps(seq, indent=2, allow_nan=False))
         if args.output:
             atomic_json_write(Path(args.output), seq)
