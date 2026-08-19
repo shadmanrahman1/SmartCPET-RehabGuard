@@ -403,6 +403,9 @@ def analyze_video(
             limitations=LIMITATIONS,
             include_frames=True,
         )
+        # Explicit data origin for this offline MediaPipe video session.
+        export["data_origin"] = "REAL_VIDEO_MEDIAPIPE"
+        export["processing_mode"] = "offline_mediapipe_video"
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(
