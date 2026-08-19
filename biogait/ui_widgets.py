@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections import deque
 from typing import Any, Optional
 
-from PyQt5.QtCore import Qt, QPointF, QRectF
+from PyQt5.QtCore import Qt, QPointF, QRectF, pyqtSignal
 from PyQt5.QtGui import (
     QBrush, QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen
 )
