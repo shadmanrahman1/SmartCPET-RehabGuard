@@ -77,6 +77,7 @@ def _process_one(av, video: Path, out_json: Path, model, fps_override) -> dict:
     atomic_json_write(out_json, export)
     return {
         "sequence_key": opaque_key(video.name),
+        "data_origin": "REAL_VIDEO_MEDIAPIPE",
         "status": "ok",
         "output_file": out_json.name,
     }
@@ -107,6 +108,7 @@ def run_batch(
             running.append(
                 {
                     "sequence_key": seq_key,
+                    "data_origin": "REAL_VIDEO_MEDIAPIPE",
                     "status": "failed",
                     "error_type": type(exc).__name__,
                 }

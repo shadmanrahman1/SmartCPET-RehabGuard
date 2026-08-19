@@ -133,6 +133,7 @@ def _finalize_results(
     sorted_ms = sorted(per_frame_ms)
     results: dict[str, Any] = {
         "source_type": "local_video",
+        "data_origin": "REAL_VIDEO_MEDIAPIPE",
         "timing_model": "constant_frame_rate_from_fps",
         "video_fps_hz": (round(fps, 4) if fps_from_video else None),
         "fps_used_hz": round(fps, 4),

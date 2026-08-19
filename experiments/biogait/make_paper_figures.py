@@ -88,19 +88,24 @@ def render_figures(input_dir: Optional[Path], output_dir: Path) -> list[dict]:
         ref_sig = ref.get("filtered_signal") if isinstance(ref, dict) else None
         adapted_sig = adapted.get("filtered_signal") if isinstance(adapted, dict) else None
         if isinstance(ref_sig, list) and isinstance(adapted_sig, list):
+            a_origin = session.get("data_origin", "UNKNOWN_UNVALIDATED")
+            label = "synthetic validation fixture" if a_origin == "SYNTHETIC_FIXTURE" else a_origin
             fig, ax = plt.subplots(figsize=(8, 4))
             ax.plot(ref_sig, label="reference (REFERENCE_DERIVED)")
             ax.plot(adapted_sig, label="adapted (ENGINEERING_ADAPTED)")
             ax.set_xlabel("sample"); ax.set_ylabel("filtered knee angle (deg)")
-            ax.set_title("Figure A: reference vs adapted filtered trajectory")
+            ax.set_title(f"Figure A: reference vs adapted filtered trajectory — {label}")
             ax.legend()
             _save("figure_A_trajectory.png")
+            status[-1]["origin"] = a_origin
         else:
             status.append({"figure": "A", "status": "PENDING_DATA"})
 
     # Figure B: FPS sensitivity
     fps = load_json(input_dir / "fps_sensitivity.json")
     if fps and fps.get("rows"):
+        fps_origin = fps.get("data_origin", "UNKNOWN_UNVALIDATED")
+        label = "synthetic validation fixture" if fps_origin == "SYNTHETIC_FIXTURE" else fps_origin
         left_rows = [r for r in fps["rows"] if r.get("side") == "left"]
         x = [r["fps"] for r in left_rows]
         rom = [r["rom_deg"] for r in left_rows]
@@ -109,8 +114,9 @@ def render_figures(input_dir: Optional[Path], output_dir: Path) -> list[dict]:
             ax.plot(x, rom, marker="o")
             ax.set_xlabel("sampling rate (Hz)")
             ax.set_ylabel("left ROM (deg)")
-            ax.set_title("Figure B: FPS sensitivity (ENGINEERING_ADAPTED; 30 Hz is REFERENCE anchor)")
+            ax.set_title(f"Figure B: FPS sensitivity — {label}")
             _save("figure_B_fps_sensitivity.png")
+            status[-1]["origin"] = fps_origin
         else:
             status.append({"figure": "B", "status": "PENDING_DATA"})
     else:
@@ -119,6 +125,8 @@ def render_figures(input_dir: Optional[Path], output_dir: Path) -> list[dict]:
     # Figure C: missingness vs PO availability
     missing = load_json(input_dir / "missingness_sensitivity.json")
     if missing and missing.get("rows"):
+        m_origin = missing.get("data_origin", "UNKNOWN_UNVALIDATED")
+        label = "synthetic validation fixture" if m_origin == "SYNTHETIC_FIXTURE" else m_origin
         rows = missing["rows"]
         x = [r["missingness_level"] for r in rows]
         y_po = [r["po_coverage"]["both"] for r in rows]
@@ -126,8 +134,9 @@ def render_figures(input_dir: Optional[Path], output_dir: Path) -> list[dict]:
         ax.plot(x, y_po, marker="o")
         ax.set_xlabel("injected missingness level")
         ax.set_ylabel("both-PO coverage")
-        ax.set_title("Figure C: missingness vs PO availability")
+        ax.set_title(f"Figure C: missingness vs PO availability — {label}")
         _save("figure_C_missingness.png")
+        status[-1]["origin"] = m_origin
     else:
         status.append({"figure": "C", "status": "PENDING_DATA"})
 
@@ -136,12 +145,13 @@ def render_figures(input_dir: Optional[Path], output_dir: Path) -> list[dict]:
     if bench and bench.get("summary", {}).get("REAL_VIDEO_BENCHMARK") == "COMPLETE":
         means = [r for r in bench.get("per_video", []) if r.get("status") == "ok" and r.get("mean_ms_per_frame") is not None]
         if means:
-            labels = [r["filename"] for r in means]
+            # Opaque sequence labels only — never raw filenames.
+            labels = ["seq-" + str(r.get("sequence_key", ""))[:6] for r in means]
             vals = [r["mean_ms_per_frame"] for r in means]
             fig, ax = plt.subplots(figsize=(8, 4))
             ax.bar(labels, vals)
             ax.set_ylabel("mean ms/frame")
-            ax.set_title("Figure D: runtime mean latency per video (measured)")
+            ax.set_title("Figure D: runtime mean latency per sequence (measured, REAL_VIDEO_MEDIAPIPE)")
             ax.tick_params(axis="x", rotation=45)
             _save("figure_D_runtime.png")
         else:
@@ -158,9 +168,10 @@ def render_figures(input_dir: Optional[Path], output_dir: Path) -> list[dict]:
     im = ax.imshow(data, cmap="Blues", aspect="auto", vmin=0, vmax=1)
     ax.set_xticks(range(len(key_order))); ax.set_xticklabels(key_order, rotation=45, ha="right")
     ax.set_yticks(range(len(conds))); ax.set_yticklabels(conds)
-    ax.set_title("Figure E: feature availability matrix")
+    ax.set_title("Figure E: feature availability matrix — synthetic validation fixture (SYNTHETIC_FIXTURE)")
     fig.colorbar(im)
     _save("figure_E_availability_matrix.png")
+    status[-1]["origin"] = "SYNTHETIC_FIXTURE"
 
     return status
 
