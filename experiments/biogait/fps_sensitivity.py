@@ -159,6 +159,7 @@ def fps_sensitivity(
     right_angles: list[float],
     src_fs: float = 30.0,
     rates: Sequence[float] = DEFAULT_RATES,
+    data_origin: str = "UNKNOWN_UNVALIDATED",
 ) -> dict:
     if not math.isclose(src_fs, 30.0, rel_tol=0.0, abs_tol=1e-6):
         raise ValueError("fps_sensitivity expects a 30 Hz source sequence as the REFERENCE anchor")
@@ -171,12 +172,20 @@ def fps_sensitivity(
             continue
         left_rows.append(_rate_result(left_angles, src_fs, rate, "left", anchor_left))
         right_rows.append(_rate_result(right_angles, src_fs, rate, "right", anchor_right))
+    for row in left_rows + right_rows:
+        row["data_origin"] = data_origin
     return {
         "experiment": "fps_sensitivity",
         "schema_version": "1.0",
+        "data_origin": data_origin,
         "source_fs": src_fs,
         "rates_evaluated": [round(r, 4) for r in [30.0] + [r for r in rates if not math.isclose(r, 30.0, abs_tol=1e-6)]],
-        "note": "30 Hz is the REFERENCE_DERIVED anchor; other rates are ENGINEERING_ADAPTED experiments.",
+        "note": (
+            "30 Hz is the REFERENCE_DERIVED anchor (method provenance) for "
+            "non-30 Hz ENGINEERING_ADAPTED experiments. data_origin describes "
+            "the input source and is distinct from method provenance; a "
+            "synthetic 30 Hz fixture is NOT real-dataset evidence."
+        ),
         "rows": left_rows + right_rows,
     }
 
@@ -199,7 +208,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     seq = synthetic_ex5_sequence(args.n_frames, 30.0, seed=0)
     left = angle_sequence_from_knee(seq["joints"], "left_knee")
     right = angle_sequence_from_knee(seq["joints"], "right_knee")
-    result = fps_sensitivity(left, right, src_fs=30.0)
+    result = fps_sensitivity(
+        left, right, src_fs=30.0, data_origin="SYNTHETIC_FIXTURE"
+    )
     if args.print or args.output is None:
         import json
         print(json.dumps(result, indent=2, allow_nan=False))

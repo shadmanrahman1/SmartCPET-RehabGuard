@@ -91,6 +91,7 @@ def availability_matrix() -> list[dict]:
         rows.append(
             {
                 "landmark_condition": condition,
+                "data_origin": "SYNTHETIC_FIXTURE",
                 "left_po": bool(q.get("left_po_available")),
                 "right_po": bool(q.get("right_po_available")),
                 "wrist_cf": cf.get("wrist_distance_m") is not None
@@ -130,10 +131,20 @@ def main(argv: Optional[list[str]] = None) -> int:
     import json
 
     rows = availability_matrix()
+    result = {
+        "experiment": "landmark_robustness",
+        "data_origin": "SYNTHETIC_FIXTURE",
+        "note": (
+            "Deterministic synthetic feature-loss robustness matrix; validates "
+            "software behavior / provenance routing, not clinical, MediaPipe, "
+            "or KIMORE-dataset performance."
+        ),
+        "rows": rows,
+    }
     if args.output or args.csv is None:
-        print(json.dumps(rows, indent=2, allow_nan=False))
+        print(json.dumps(result, indent=2, allow_nan=False))
     if args.output:
-        atomic_json_write(Path(args.output), rows)
+        atomic_json_write(Path(args.output), result)
         print(f"[landmark_robustness] wrote {args.output}")
     if args.csv:
         Path(args.csv).write_text(availability_matrix_csv(rows), encoding="utf-8")

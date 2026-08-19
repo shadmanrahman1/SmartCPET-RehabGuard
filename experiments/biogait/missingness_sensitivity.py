@@ -102,12 +102,44 @@ def _descriptive_feature_availability(evidence) -> float:
     return present / len(numeric)
 
 
+def _valid_fs(value) -> Optional[float]:
+    import math
+    if value is None:
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) and f > 0 else None
+
+
 def missingness_sensitivity(
     seq,
     levels: tuple[float, ...] = MISSINGNESS_LEVELS,
     seed: int = 0,
     burst: bool = False,
+    data_origin: str = "UNKNOWN_UNVALIDATED",
 ) -> dict:
+    # No silent 30 Hz assignment: a valid sampling rate must come from the
+    # sequence itself (a synthetic fixture carries its own known fs). Without
+    # a valid rate, temporal filtering / reference analysis is not run.
+    fs = _valid_fs(seq.get("sampling_rate_hz"))
+    if fs is None:
+        return {
+            "experiment": "missingness_sensitivity",
+            "schema_version": "1.0",
+            "data_origin": data_origin,
+            "seed": int(seed),
+            "burst_dropout": bool(burst),
+            "status": "sampling_rate_required",
+            "note": (
+                "A valid sequence sampling rate is required to run temporal "
+                "filtering / reference analysis; it was not supplied. "
+                "Coverage/robustness geometry was not evaluated."
+            ),
+            "rows": [],
+        }
+
     full = _full_evidence(seq)
     n = len(full)
     rows = []
@@ -115,7 +147,6 @@ def missingness_sensitivity(
         masked = _mask_indices(n, level, seed, burst)
         evidence = _apply_missingness(full, masked)
         left_angles = _left_angle_stream(evidence)
-        fs = seq.get("sampling_rate_hz") or 30.0
         ts = seq.get("timestamps_s") or [i / fs for i in range(n)]
         ref = kimore_reference_ex5_temporal_analysis(left_angles, ts, fs)
         adapted = kimore_adapted_ex5_temporal_analysis(left_angles, ts, fs)
@@ -127,6 +158,7 @@ def missingness_sensitivity(
         rows.append(
             {
                 "missingness_level": level,
+                "data_origin": data_origin,
                 "missing_frames": len(masked),
                 "total_frames": n,
                 "po_coverage": {
@@ -155,11 +187,15 @@ def missingness_sensitivity(
     return {
         "experiment": "missingness_sensitivity",
         "schema_version": "1.0",
+        "data_origin": data_origin,
         "seed": int(seed),
         "burst_dropout": bool(burst),
+        "status": "complete",
         "note": (
             "Measures robust coverage of the current conservative missing-data "
-            "behavior; production analysis is not modified to interpolate gaps."
+            "behavior; production analysis is not modified to interpolate gaps. "
+            "data_origin is distinct from method provenance; synthetic runs are "
+            "not participant/dataset results."
         ),
         "rows": rows,
     }
@@ -185,7 +221,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     from kimore_adapter import synthetic_ex5_sequence
 
     seq = synthetic_ex5_sequence(args.n_frames, 30.0, seed=args.seed)
-    result = missingness_sensitivity(seq, seed=args.seed, burst=args.burst)
+    result = missingness_sensitivity(
+        seq, seed=args.seed, burst=args.burst, data_origin="SYNTHETIC_FIXTURE"
+    )
     if args.print or args.output is None:
         print(json.dumps(result, indent=2, allow_nan=False))
     if args.output:

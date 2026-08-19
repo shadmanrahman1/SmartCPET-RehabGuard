@@ -78,6 +78,19 @@ class FpsSensitivityTests(unittest.TestCase):
         for r in (15, 20, 24, 25, 29.97, 30, 50, 60):
             self.assertIn(float(r), [round(x, 4) for x in DEFAULT_RATES])
 
+    def test_data_origin_default_unknown(self):
+        stream = _periodic()
+        result = fps_sensitivity(stream, stream, src_fs=30.0, rates=(25.0,))
+        self.assertEqual(result["data_origin"], "UNKNOWN_UNVALIDATED")
+
+    def test_data_origin_propagates_to_result_and_rows(self):
+        stream = _periodic()
+        result = fps_sensitivity(stream, stream, src_fs=30.0, rates=(25.0,),
+                                 data_origin="SYNTHETIC_FIXTURE")
+        self.assertEqual(result["data_origin"], "SYNTHETIC_FIXTURE")
+        for row in result["rows"]:
+            self.assertEqual(row["data_origin"], "SYNTHETIC_FIXTURE")
+
 
 if __name__ == "__main__":
     unittest.main()

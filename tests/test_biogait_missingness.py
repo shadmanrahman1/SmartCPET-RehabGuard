@@ -60,6 +60,19 @@ class MissingnessTests(unittest.TestCase):
     def test_levels_include_spec(self):
         self.assertEqual(MISSINGNESS_LEVELS, (0.0, 0.05, 0.10, 0.20, 0.30))
 
+    def test_sampling_rate_required_when_unknown(self):
+        seq = synthetic_ex5_sequence(200, 30.0, seed=0)
+        seq["sampling_rate_hz"] = None
+        result = missingness_sensitivity(seq, seed=0)
+        self.assertEqual(result["status"], "sampling_rate_required")
+        self.assertEqual(result["rows"], [])
+
+    def test_data_origin_propagates(self):
+        seq = synthetic_ex5_sequence(200, 30.0, seed=0)
+        result = missingness_sensitivity(seq, seed=0, data_origin="SYNTHETIC_FIXTURE")
+        self.assertEqual(result["data_origin"], "SYNTHETIC_FIXTURE")
+        self.assertEqual(result["rows"][0]["data_origin"], "SYNTHETIC_FIXTURE")
+
 
 if __name__ == "__main__":
     unittest.main()

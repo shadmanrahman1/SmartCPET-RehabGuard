@@ -84,36 +84,49 @@ def build_tables(input_dir: Optional[Path]) -> dict:
     from landmark_robustness import availability_matrix
     matrix = availability_matrix()
     table4_headers = list(matrix[0].keys())
-    table4 = [
-        [str(v) for v in row.values()]
-        for row in matrix
-    ]
+    table4 = {
+        "status": "SYNTHETIC_ONLY",
+        "headers": table4_headers,
+        "rows": [[str(v) for v in row.values()] for row in matrix],
+        "note": (
+            "Software/algorithm validation on a deterministic synthetic "
+            "fixture; not an empirical KIMORE or participant result."
+        ),
+    }
 
-    # TABLE 5: runtime benchmark — numeric only when measured data exists.
+    # TABLE 5: runtime benchmark — EMPIRICAL_COMPLETE only from real video.
     bench = load_json(input_dir / "benchmark_batch.json")
     if bench and bench.get("summary", {}).get("REAL_VIDEO_BENCHMARK") == "COMPLETE":
         s = bench["summary"]
         table5 = {
-            "status": "COMPLETE",
+            "status": "EMPIRICAL_COMPLETE",
             "headers": ["metric", "value"],
             "rows": [
                 ["n_videos", str(s["n_videos"])],
                 ["n_success", str(s["n_success"])],
                 ["total_frames", str(s["aggregate"]["total_frames"])],
                 ["mean_ms_per_frame_over_videos", str(s["aggregate"]["mean_ms_per_frame_over_videos"])],
-                ["p95_ms_per_frame_over_videos", str(s["aggregate"]["p95_ms_per_frame_over_videos"])],
+                ["mean_of_video_p95_ms_per_frame", str(s["aggregate"]["mean_of_video_p95_ms_per_frame"])],
+                ["overall_world_landmark_availability_rate", str(s["aggregate"]["overall_world_landmark_availability_rate"])],
                 ["effective_throughput_fps_over_videos", str(s["aggregate"]["effective_throughput_fps_over_videos"])],
             ],
         }
     else:
-        table5 = {"status": "PENDING_DATA", "headers": ["status", "value"], "rows": [["REAL_VIDEO_BENCHMARK", "PENDING"]]}
+        table5 = {"status": "PENDING_DATA", "headers": ["status", "value"], "rows": [["REAL_VIDEO_BENCHMARK", "PENDING"]], "note": "no real-video benchmark measurement"}
 
-    # TABLE 6: FPS sensitivity — numeric only when the experiment ran.
+    # TABLE 6: FPS sensitivity — synthetic vs empirical by data_origin.
     fps = load_json(input_dir / "fps_sensitivity.json")
-    if fps:
+    fps_status = "PENDING_DATA"
+    fps_note = None
+    if fps and fps.get("rows"):
+        origin = fps.get("data_origin", "UNKNOWN_UNVALIDATED")
+        fps_status = "EMPIRICAL_COMPLETE" if origin in ("REAL_KIMORE_NATIVE_SKELETON",) else "SYNTHETIC_ONLY"
+        if fps_status == "SYNTHETIC_ONLY":
+            fps_note = ("Software/algorithm validation on a deterministic synthetic fixture; "
+                        "not an empirical KIMORE or participant result.")
         headers = ["side", "fps", "classification", "rom_deg", "peak_abs_angular_velocity_deg_s", "n_event_candidates", "rom_drift_abs"]
         table6 = {
-            "status": "COMPLETE",
+            "status": fps_status,
             "headers": headers,
             "rows": [
                 [
@@ -124,15 +137,16 @@ def build_tables(input_dir: Optional[Path]) -> dict:
                 ]
                 for r in fps.get("rows", [])
             ],
+            "note": fps_note,
         }
     else:
         table6 = {"status": "PENDING_DATA", "headers": ["status"], "rows": [["FPS_SENSITIVITY=PENDING"]]}
 
     return {
-        "table1_components": {"headers": list(TABLE1[0].keys()), "rows": [[str(r[h]) for h in TABLE1[0].keys()] for r in TABLE1]},
-        "table2_kimore_mapping": {"headers": list(TABLE2[0].keys()), "rows": [[str(r[h]) for h in TABLE2[0].keys()] for r in TABLE2]},
-        "table3_protocol": {"headers": ["step", "detail"], "rows": [[r["step"], r["detail"]] for r in TABLE3]},
-        "table4_robustness": {"headers": table4_headers, "rows": table4},
+        "table1_components": {"status": "COMPLETE", "headers": list(TABLE1[0].keys()), "rows": [[str(r[h]) for h in TABLE1[0].keys()] for r in TABLE1]},
+        "table2_kimore_mapping": {"status": "COMPLETE", "headers": list(TABLE2[0].keys()), "rows": [[str(r[h]) for h in TABLE2[0].keys()] for r in TABLE2]},
+        "table3_protocol": {"status": "COMPLETE", "headers": ["step", "detail"], "rows": [[r["step"], r["detail"]] for r in TABLE3]},
+        "table4_robustness": table4,
         "table5_benchmark": table5,
         "table6_fps": table6,
     }
@@ -144,13 +158,36 @@ def _fmt(v) -> str:
 
 def render_markdown(tables: dict) -> str:
     out = ["# BioGait Paper-Ready Tables (Sprint B)", ""]
-    out.append(_table_md("TABLE 1: BioGait components", tables["table1_components"]["headers"], tables["table1_components"]["rows"]))
-    out.append(_table_md("TABLE 2: KIMORE Ex5 source-to-BioGait mapping", tables["table2_kimore_mapping"]["headers"], tables["table2_kimore_mapping"]["rows"]))
-    out.append(_table_md("TABLE 3: Evaluation protocol", tables["table3_protocol"]["headers"], tables["table3_protocol"]["rows"]))
-    out.append(_table_md("TABLE 4: Landmark/missingness robustness", tables["table4_robustness"]["headers"], tables["table4_robustness"]["rows"]))
-    out.append(_table_md("TABLE 5: Runtime benchmark", tables["table5_benchmark"]["headers"], tables["table5_benchmark"]["rows"]))
-    out.append(_table_md("TABLE 6: FPS sensitivity", tables["table6_fps"]["headers"], tables["table6_fps"]["rows"]))
-    out.append("> Numeric tables only include measured/derived data. PENDING_DATA rows are placeholders, not measurements.")
+    section_notes = {
+        "table1_components": "Status: COMPLETE (structural; no numeric claims).",
+        "table2_kimore_mapping": "Status: COMPLETE (provenance mapping).",
+        "table3_protocol": "Status: COMPLETE (protocol description).",
+        "table4_robustness": f"Status: {tables['table4_robustness']['status']}.",
+        "table5_benchmark": f"Status: {tables['table5_benchmark']['status']}.",
+        "table6_fps": f"Status: {tables['table6_fps']['status']}.",
+    }
+    titles = {
+        "table1_components": "TABLE 1: BioGait components",
+        "table2_kimore_mapping": "TABLE 2: KIMORE Ex5 source-to-BioGait mapping",
+        "table3_protocol": "TABLE 3: Evaluation protocol",
+        "table4_robustness": "TABLE 4: Landmark/missingness robustness",
+        "table5_benchmark": "TABLE 5: Runtime benchmark",
+        "table6_fps": "TABLE 6: FPS sensitivity",
+    }
+    for key in ("table1_components", "table2_kimore_mapping", "table3_protocol",
+                "table4_robustness", "table5_benchmark", "table6_fps"):
+        table = tables[key]
+        out.append(_table_md(titles[key], table["headers"], table["rows"]))
+        out.append(f"> {section_notes[key]}")
+        note = table.get("note")
+        if note:
+            out.append(f"> {note}")
+        out.append("")
+    out.append(
+        "> Status classes: EMPIRICAL_COMPLETE = real measured data; "
+        "SYNTHETIC_ONLY = deterministic synthetic validation (not participant/"
+        "dataset results); PENDING_DATA = no data, no fabricated numbers."
+    )
     return "\n".join(out)
 
 

@@ -35,6 +35,9 @@ class PaperTablesTests(unittest.TestCase):
             rows = tables["table4_robustness"]["rows"]
             self.assertTrue(rows)
             self.assertIn("landmark_condition", tables["table4_robustness"]["headers"])
+            # Robustness matrix is a synthetic fixture.
+            self.assertEqual(tables["table4_robustness"]["status"], "SYNTHETIC_ONLY")
+            self.assertIn("synthetic", tables["table4_robustness"]["note"].lower())
 
     def test_table5_pending_without_benchmark_data(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -47,7 +50,7 @@ class PaperTablesTests(unittest.TestCase):
             tables = build_tables(Path(tmp))
             self.assertEqual(tables["table6_fps"]["status"], "PENDING_DATA")
 
-    def test_table5_complete_when_benchmark_data_exists(self):
+    def test_table5_empirical_complete_when_benchmark_data_exists(self):
         bench = {
             "summary": {
                 "REAL_VIDEO_BENCHMARK": "COMPLETE",
@@ -55,7 +58,8 @@ class PaperTablesTests(unittest.TestCase):
                 "aggregate": {
                     "total_frames": 1000,
                     "mean_ms_per_frame_over_videos": 12.0,
-                    "p95_ms_per_frame_over_videos": 20.0,
+                    "mean_of_video_p95_ms_per_frame": 20.0,
+                    "overall_world_landmark_availability_rate": 0.9,
                     "effective_throughput_fps_over_videos": 30.0,
                 },
             }
@@ -63,14 +67,30 @@ class PaperTablesTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             atomic_json_write(Path(tmp) / "benchmark_batch.json", bench)
             tables = build_tables(Path(tmp))
-            self.assertEqual(tables["table5_benchmark"]["status"], "COMPLETE")
+            self.assertEqual(tables["table5_benchmark"]["status"], "EMPIRICAL_COMPLETE")
 
-    def test_markdown_renders_all_tables(self):
+    def test_table6_synthetic_only_from_synthetic_fps(self):
+        import json
+        fps = {
+            "data_origin": "SYNTHETIC_FIXTURE",
+            "experiment": "fps_sensitivity",
+            "rows": [{"side": "left", "fps": 30.0, "classification": "REFERENCE_DERIVED",
+                      "rom_deg": 90.0}],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            atomic_json_write(Path(tmp) / "fps_sensitivity.json", fps)
+            tables = build_tables(Path(tmp))
+            self.assertEqual(tables["table6_fps"]["status"], "SYNTHETIC_ONLY")
+            self.assertIn("synthetic", tables["table6_fps"]["note"].lower())
+
+    def test_markdown_renders_all_tables_and_status_classes(self):
         with tempfile.TemporaryDirectory() as tmp:
             tables = build_tables(Path(tmp))
             md = render_markdown(tables)
             for name in ("TABLE 1", "TABLE 2", "TABLE 3", "TABLE 4", "TABLE 5", "TABLE 6"):
                 self.assertIn(name, md)
+            for status in ("EMPIRICAL_COMPLETE", "SYNTHETIC_ONLY", "PENDING_DATA"):
+                self.assertIn(status, md)
 
 
 if __name__ == "__main__":
