@@ -1,0 +1,35 @@
+{
+  "title": "BioGait Sprint B — evaluation status manifest",
+  "schema_version": "1.0",
+  "updated": "2026-08-19",
+  "statuses": {
+    "unit_tests": "COMPLETE",
+    "ci": "PENDING",
+    "kimore_adapter_real_data": "PENDING",
+    "kimore_ex5_evaluation_synthetic": "COMPLETE",
+    "kimore_ex5_evaluation_real": "PENDING",
+    "fps_sensitivity_synthetic": "COMPLETE",
+    "missingness_sensitivity_synthetic": "COMPLETE",
+    "landmark_robustness_synthetic": "COMPLETE",
+    "paper_tables": "COMPLETE",
+    "paper_figures": "PENDING",
+    "real_video_smoke": "PENDING",
+    "runtime_benchmark_real_video": "PENDING",
+    "mediapipe_vs_kinect_validation": "DEFERRED"
+  },
+  "notes": {
+    "unit_tests": "Automated BioGait test suite passes (compileall + unittest).",
+    "ci": "GitHub Actions workflow added (.github/workflows/biogait-tests.yml); not yet run on this branch.",
+    "kimore_adapter_real_data": "Local-only adapter built; real KIMORE dataset was NOT available/not downloaded. Results are never fabricated.",
+    "kimore_ex5_evaluation_real": "PENDING until licensed KIMORE Ex5 skeletal data is supplied via KIMORE_DATASET_ROOT.",
+    "fps_sensitivity_synthetic": "Deterministic synthetic angle-sequence experiment executed (results gitignored).",
+    "missingness_sensitivity_synthetic": "Deterministic synthetic missingness experiment executed (results gitignored).",
+    "landmark_robustness_synthetic": "Feature-specific landmark-loss availability matrix built from synthetic fixtures.",
+    "paper_tables": "Markdown + CSV tables generated; numeric benchmark/FPS tables are PENDING_DATA (no fabricated values).",
+    "paper_figures": "matplotlib unavailable in the current environment; figures will render only when matplotlib + data are present (no fabricated curves).",
+    "real_video_smoke": "PENDING — no real video supplied; smoke_runtime.py reports PENDING safely.",
+    "runtime_benchmark_real_video": "PENDING — no real video supplied; benchmark tools write no numeric result without real execution.",
+    "mediapipe_vs_kinect_validation": "DEFERRED unless synchronized RGB + Kinect capture and a defensible alignment method exist."
+  },
+  "data_policy": "No raw datasets, raw biomedical video, local paths, or participant names are committed. Generated numeric results live under experiments/biogait/results/ and are gitignored."
+}
