@@ -15,6 +15,12 @@ mediapipe>=0.10.9,<2.0
 opencv-python>=4.8,<6.0
 numpy>=1.24,<3.0
 
+# ── Research / time-series (M2/M3 Sprint A) ───────────────────────────────────
+# SciPy is used for the KIMORE reference Butterworth + filtfilt filter and the
+# offline peak detection. This is a conservative lower-bound range, not a
+# verified-working pin.
+scipy>=1.9,<2.0
+
 # ── Primary runtime (Qt desktop) ──────────────────────────────────────────────
 PyQt5>=5.15,<6.0
 

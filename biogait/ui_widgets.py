@@ -226,3 +226,98 @@ class ReasonsBox(QFrame):
 
     def set_reasons(self, reasons: list[str]) -> None:
         self._body.setText("\n".join(f"• {r}" for r in reasons) if reasons else "No issues detected.")
+
+
+# ── ResearchEvidencePanel ─────────────────────────────────────────────────────
+class ResearchEvidencePanel(QFrame):
+    """Small research-only display for KIMORE-informed evidence (Sprint A).
+
+    Shows descriptive kinematics only. It deliberately shows NO correct/
+    incorrect, no clinical score, no pass/fail, and no clinical colour
+    semantics. Keep this panel information-neutral.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setStyleSheet(f"""
+            QFrame {{
+                background: {BG_CARD};
+                border: 1px solid {BORDER};
+                border-radius: 10px;
+            }}
+        """)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 12, 16, 12)
+        lay.setSpacing(6)
+
+        hdr = QLabel("RESEARCH EVIDENCE — KIMORE-INFORMED")
+        hdr.setStyleSheet(
+            f"color:{TEXT_SEC}; font-size:10px; font-weight:700; letter-spacing:1px;"
+        )
+        lay.addWidget(hdr)
+
+        sub = QLabel("Descriptive kinematics only — not a clinical score")
+        sub.setStyleSheet(f"color:{TEXT_SEC}; font-size:9px;")
+        lay.addWidget(sub)
+
+        self._rows: dict[str, QLabel] = {}
+        self._units: dict[str, str] = {}
+        row_specs = [
+            ("L sagittal knee", "°"),
+            ("R sagittal knee", "°"),
+            ("Current PO evidence", ""),
+            ("Rolling PO availability", ""),
+            ("Rolling L ROM", "°"),
+            ("Rolling R ROM", "°"),
+        ]
+        for label, unit in row_specs:
+            self._units[label] = unit
+            grid = QHBoxLayout(); grid.setSpacing(8)
+            name = QLabel(label)
+            name.setStyleSheet(
+                f"color:{TEXT_SEC}; font-size:10px; font-weight:600;"
+            )
+            val = QLabel("--")
+            val.setStyleSheet(f"color:{TEXT_PRI}; font-size:12px; font-weight:600;")
+            val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            grid.addWidget(name)
+            grid.addStretch()
+            grid.addWidget(val)
+            self._rows[label] = val
+            lay.addLayout(grid)
+
+    def update_research_evidence(self, payload: dict) -> None:
+        def _fmt(name: str, value, digits: int = 1) -> str:
+            if value is None:
+                return "--"
+            unit = self._units.get(name, "")
+            if isinstance(value, float):
+                return f"{value:.{digits}f}{unit}"
+            return f"{value}{unit}"
+
+        self._rows["L sagittal knee"].setText(
+            _fmt("L sagittal knee", payload.get("left_knee_sagittal_deg"))
+        )
+        self._rows["R sagittal knee"].setText(
+            _fmt("R sagittal knee", payload.get("right_knee_sagittal_deg"))
+        )
+
+        quality = payload.get("quality") or {}
+        available = payload.get("available", False) or quality.get("available", False)
+        self._rows["Current PO evidence"].setText(
+            "available" if available else "unavailable"
+        )
+
+        rate = payload.get("rolling_po_availability_rate")
+        self._rows["Rolling PO availability"].setText(
+            f"{rate * 100:.1f}%" if isinstance(rate, (int, float)) else "--"
+        )
+
+        # Rolling window ROM (last-300-processed-frame window), never billed
+        # as whole-session ROM.
+        self._rows["Rolling L ROM"].setText(
+            _fmt("Rolling L ROM", payload.get("rolling_left_knee_rom_deg"))
+        )
+        self._rows["Rolling R ROM"].setText(
+            _fmt("Rolling R ROM", payload.get("rolling_right_knee_rom_deg"))
+        )
