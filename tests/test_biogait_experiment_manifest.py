@@ -91,6 +91,17 @@ class SplitTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             subject_disjoint_split(m, test_frac=0.6, val_frac=0.6, seed=0)
 
+    def test_split_fraction_validation(self):
+        m = build_manifest(_sequences(8), seed=0)
+        for bad_t, bad_v in ((float("nan"), 0.2), (float("inf"), 0.2), (-0.1, 0.2),
+                             (1.0, 0.0), (0.7, 0.4)):
+            with self.assertRaises(ValueError):
+                subject_disjoint_split(m, test_frac=bad_t, val_frac=bad_v, seed=0)
+
+    def test_valid_fractions_do_not_raise(self):
+        m = build_manifest(_sequences(8), seed=0)
+        subject_disjoint_split(m, test_frac=0.2, val_frac=0.2, seed=0)
+
 
 if __name__ == "__main__":
     unittest.main()

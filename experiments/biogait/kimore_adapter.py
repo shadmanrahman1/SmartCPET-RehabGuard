@@ -69,6 +69,26 @@ JOINT_ROLE_CANDIDATES: dict[str, tuple[str, ...]] = {
 
 REAL_KIMORE_DATASET_VALIDATION = "PENDING"
 
+# Reviewed Joint_Position fixed-column convention (MATLAB 1-based source).
+# Each joint occupies three consecutive columns (x, y, z) starting at the
+# listed 1-based column. Convert carefully to zero-based numpy indices.
+JOINT_POSITION_START_COLUMNS = {
+    "left_shoulder": 17,
+    "left_hand": 29,
+    "right_shoulder": 33,
+    "right_hand": 45,
+    "left_hip": 49,
+    "left_knee": 53,
+    "left_ankle": 57,
+    "right_hip": 65,
+    "right_knee": 69,
+    "right_ankle": 73,
+}
+JOINT_POSITION_MAX_END_COLUMN = max(
+    start + 2 for start in JOINT_POSITION_START_COLUMNS.values()
+)  # 75 (1-based) -> needs >= 75 columns
+JOINT_POSITION_VAR_NAMES = ("Joint_Position", "Joint_Positions", "joint_position")
+
 
 def _norm(name: str) -> str:
     return name.strip().upper().replace(" ", "_")
@@ -98,7 +118,14 @@ def discover_root(root: Path) -> dict[str, Any]:
 
     Best-effort: treats depth-1 entries as groups and depth-2 entries as
     subjects, and lists candidate data files. Opaque keys are used; no local
-    paths or participant names are exposed.
+    paths or participant names are exposed. The local root directory name is
+    NOT persisted as research metadata (a neutral ``source_type`` is used
+    instead).
+
+    Important: candidate files EXISTING does NOT imply the dataset is valid.
+    Validation becomes COMPLETE only after a supported sequence is successfully
+    parsed and structurally validated (see ``parse_joint_table`` /
+    ``parse_joint_position_matrix``).
     """
     root = Path(root).resolve()
     if not root.exists() or not root.is_dir():
@@ -117,19 +144,22 @@ def discover_root(root: Path) -> dict[str, Any]:
                     data_files.append(opaque_key(str(f.relative_to(root))))
         groups[group_key] = {"group_label": group_dir.name, "subjects": subjects}
 
+    if not data_files:
+        validation_status = "NO_CANDIDATE_FILES"
+    else:
+        # Candidate files are present but have not been parsed/validated here.
+        validation_status = "CANDIDATE_FILES_PRESENT_UNVALIDATED"
+
     return {
-        "root_label": root.name,
+        "source_type": "local_kimore_root",
         "groups": groups,
-        "candidate_data_files": sorted(data_files),
-        "real_dataset_valid": bool(data_files),
-        "validation_status": (
-            "REAL_KIMORE_DATASET_VALIDATION=PENDING"
-            if not data_files
-            else "present"
-        ),
+        "candidate_data_file_keys": sorted(data_files),
+        "validation_status": validation_status,
         "note": (
-            "Real KIMORE validation pending unless candidate data files are "
-            "parsed successfully; results are not fabricated."
+            "Candidate file presence does not imply real-dataset validation. "
+            "Real-dataset validation becomes PARSED_SEQUENCE_VALIDATED only "
+            "after a supported sequence is successfully parsed and structurally "
+            "validated; results are never fabricated."
         ),
     }
 
@@ -138,8 +168,10 @@ def parse_joint_table(filepath: Path) -> Optional[dict[str, dict[str, list[float
     """Parse a KIMORE-style joint-position table into role->axes arrays.
 
     Supports .csv/.txt (header + rows), .json (dict of arrays), and .mat via
-    scipy.io (when available). Returns ``None`` when the table cannot be
-    mapped to BioGait roles.
+    scipy.io (when available). For .mat, a recognizable ``Joint_Position``
+    variable is parsed explicitly with the fixed-column convention; otherwise
+    named-array mapping is attempted. Returns ``None`` when the table cannot
+    be mapped to BioGait roles.
     """
     ext = filepath.suffix.lower()
     if ext in {".mat"}:
@@ -151,6 +183,11 @@ def parse_joint_table(filepath: Path) -> Optional[dict[str, dict[str, list[float
             data = loadmat(str(filepath))
         except Exception:
             return None
+        for var in JOINT_POSITION_VAR_NAMES:
+            if var in data:
+                parsed = parse_joint_position_matrix(data[var])
+                if parsed:
+                    return parsed
         return _map_arrays(data)
     if ext in {".json"}:
         data = load_json(filepath)
@@ -160,6 +197,86 @@ def parse_joint_table(filepath: Path) -> Optional[dict[str, dict[str, list[float
     if ext in {".csv", ".txt"}:
         return _parse_csv_txt(filepath)
     return None
+
+
+def parse_joint_position_matrix(matrix) -> Optional[dict[str, dict[str, list[float]]]]:
+    """Parse a 2D numeric Joint_Position matrix into normalized BioGait roles.
+
+    Layout (reviewed source, MATLAB 1-based start columns -> zero-based numpy):
+
+        left_shoulder  col 17 (idx 16)      ... x/y/z at idx 16,17,18
+        left_hand      col 29 (idx 28)
+        right_shoulder col 33 (idx 32)
+        right_hand     col 45 (idx 44)
+        left_hip       col 49 (idx 48)
+        left_knee      col 53 (idx 52)
+        left_ankle     col 57 (idx 56)
+        right_hip      col 65 (idx 64)
+        right_knee     col 69 (idx 68)
+        right_ankle    col 73 (idx 72)
+
+    Each joint uses columns c, c+1, c+2 for x/y/z. The matrix is treated as a
+    uniform, finite numeric sample array: non-finite entries are preserved and
+    handled downstream as unavailable (never read as a quaternion/orientation,
+    never treated as MediaPipe landmarks).
+
+    Returns normalized ``{role: {"x":[...],"y":[...],"z":[...]}}`` or ``None``
+    when the matrix does not satisfy the reviewed schema (wrong rank / too few
+    columns / non-numeric). Validated against the reviewed Joint_Position
+    column convention; real dataset execution remains pending until a local
+    KIMORE sequence is supplied.
+    """
+    import numpy as np
+
+    arr = np.asarray(matrix)
+    if arr.ndim != 2:
+        return None
+    if arr.shape[1] < JOINT_POSITION_MAX_END_COLUMN:
+        return None
+    try:
+        arr = arr.astype(float)
+    except (TypeError, ValueError):
+        return None
+    if arr.shape[0] == 0:
+        return None
+
+    joints: dict[str, dict[str, list[float]]] = {}
+    for role, start_1based in JOINT_POSITION_START_COLUMNS.items():
+        start = start_1based - 1  # zero-based numpy index
+        x = [float(v) for v in arr[:, start]]
+        y = [float(v) for v in arr[:, start + 1]]
+        z = [float(v) for v in arr[:, start + 2]]
+        joints[role] = {"x": x, "y": y, "z": z}
+    return joints
+
+
+def _map_arrays(data: dict) -> Optional[dict]:
+    """Map named arrays (list/tuple/numpy 1D, Nx1, 1xN) to role->axes arrays."""
+    import numpy as np
+
+    arrays: dict[str, dict[str, list[float]]] = {}
+    for key, value in data.items():
+        if key in JOINT_POSITION_VAR_NAMES:
+            continue  # handled explicitly by parse_joint_table, not here
+        mapped = _match_role(key)
+        if mapped is None:
+            continue
+        role, axis = mapped
+        arr = np.asarray(value)
+        if arr.ndim == 0:
+            continue
+        if arr.ndim == 1:
+            flat = arr
+        elif arr.ndim == 2 and (arr.shape[0] == 1 or arr.shape[1] == 1):
+            flat = arr.ravel()
+        else:
+            continue  # arbitrary 2D matrix: schema not recognized, don't flatten
+        try:
+            floats = [float(v) for v in flat]
+        except (TypeError, ValueError):
+            continue
+        arrays.setdefault(role, {"x": [], "y": [], "z": []})[axis].extend(floats)
+    return arrays or None
 
 
 def _parse_csv_txt(filepath: Path) -> Optional[dict]:
@@ -191,23 +308,6 @@ def _parse_csv_txt(filepath: Path) -> Optional[dict]:
             arrays.setdefault(role, {"x": [], "y": [], "z": []})[axis].append(value)
     # Only keep roles with full x/y/z coverage for drop analysis.
     return arrays
-
-
-def _map_arrays(data: dict) -> Optional[dict]:
-    arrays: dict[str, dict[str, list[float]]] = {}
-    for key, value in data.items():
-        if not isinstance(value, (list, tuple)):
-            continue
-        mapped = _match_role(key)
-        if mapped is None:
-            continue
-        role, axis = mapped
-        try:
-            floats = [float(v) for v in value]
-        except (TypeError, ValueError):
-            continue
-        arrays.setdefault(role, {"x": [], "y": [], "z": []})[axis].extend(floats)
-    return arrays or None
 
 
 def normalized_ex5_sequence(

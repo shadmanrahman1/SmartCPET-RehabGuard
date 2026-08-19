@@ -16,6 +16,7 @@ EXPERIMENTS = REPO / "experiments" / "biogait"
 sys.path.insert(0, str(EXPERIMENTS))
 
 from kimore_adapter import (  # noqa: E402
+    JOINT_POSITION_MAX_END_COLUMN,
     KIMORE_DATASET_ROOT_ENV,
     JOINT_ROLE_CANDIDATES,
     discover_root,
@@ -100,8 +101,17 @@ class ParseAndDiscoverTests(unittest.TestCase):
             s = g / "subject_a"; s.mkdir()
             (s / "data.csv").write_text("x,y\n1,2\n", encoding="utf-8")
             report = discover_root(root)
-            self.assertTrue(report["candidate_data_files"])
-            self.assertEqual(report["validation_status"], "present")
+            self.assertTrue(report["candidate_data_file_keys"])
+            # Candidate files present does NOT imply real validation.
+            self.assertEqual(report["validation_status"], "CANDIDATE_FILES_PRESENT_UNVALIDATED")
+            self.assertEqual(report["source_type"], "local_kimore_root")
+            self.assertNotIn("root_label", report)
+
+    def test_discover_root_no_candidate_files_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report = discover_root(Path(tmp))
+            self.assertEqual(report["validation_status"], "NO_CANDIDATE_FILES")
+            self.assertEqual(report["candidate_data_file_keys"], [])
 
     def test_discover_root_missing_dir_raises(self):
         with self.assertRaises(ValueError):
@@ -112,6 +122,88 @@ class ParseAndDiscoverTests(unittest.TestCase):
         seq = normalized_ex5_sequence(joints, sequence_key="k")
         self.assertEqual(seq["n_frames"], 1)
         self.assertEqual(seq["joints"]["left_knee"]["y"], [2.0])
+
+
+class JointPositionTests(unittest.TestCase):
+    """Items 2/27: Joint_Position fixed-column parsing."""
+
+    def _matrix(self):
+        import numpy as np
+        n = 3
+        cols = JOINT_POSITION_MAX_END_COLUMN  # 75
+        arr = np.zeros((n, cols))
+        # left shoulder MATLAB col 17 -> numpy idx 16 -> x/y/z at 16,17,18.
+        arr[:, 16] = 1.0
+        arr[:, 17] = 2.0
+        arr[:, 18] = 3.0
+        # right ankle MATLAB col 73 -> idx 72.
+        arr[:, 72] = 4.0
+        arr[:, 73] = 5.0
+        arr[:, 74] = 6.0
+        return arr
+
+    def test_joint_position_zero_based_mapping(self):
+        import numpy as np
+        from kimore_adapter import parse_joint_position_matrix
+
+        joints = parse_joint_position_matrix(self._matrix())
+        self.assertIsNotNone(joints)
+        self.assertEqual(joints["left_shoulder"]["x"], [1.0, 1.0, 1.0])
+        self.assertEqual(joints["left_shoulder"]["y"], [2.0, 2.0, 2.0])
+        self.assertEqual(joints["left_shoulder"]["z"], [3.0, 3.0, 3.0])
+        self.assertEqual(joints["right_ankle"]["z"], [6.0, 6.0, 6.0])
+
+    def test_joint_position_insufficient_columns_none(self):
+        import numpy as np
+        from kimore_adapter import parse_joint_position_matrix
+
+        self.assertIsNone(parse_joint_position_matrix(np.zeros((2, 10))))
+        self.assertIsNone(parse_joint_position_matrix(np.zeros((2, JOINT_POSITION_MAX_END_COLUMN - 1))))
+        self.assertIsNone(parse_joint_position_matrix("not a matrix"))
+
+    def test_joint_position_non_numeric_none(self):
+        import numpy as np
+        from kimore_adapter import parse_joint_position_matrix
+
+        arr = np.empty((2, JOINT_POSITION_MAX_END_COLUMN), dtype=object)
+        arr[:] = "not-a-number"
+        self.assertIsNone(parse_joint_position_matrix(arr))
+
+
+class NumpyMapTests(unittest.TestCase):
+    """Item 3/27: named numpy arrays (1D/Nx1/1xN) map correctly."""
+
+    def test_numpy_1d_mapping(self):
+        import numpy as np
+        from kimore_adapter import _map_arrays
+
+        data = {"L_HIP_x": np.array([1.0, 2.0])}
+        out = _map_arrays(data)
+        self.assertEqual(out["left_hip"]["x"], [1.0, 2.0])
+
+    def test_numpy_Nx1_mapping(self):
+        import numpy as np
+        from kimore_adapter import _map_arrays
+
+        data = {"R_KNEE_y": np.array([[1.0], [2.0]])}
+        out = _map_arrays(data)
+        self.assertEqual(out["right_knee"]["y"], [1.0, 2.0])
+
+    def test_numpy_1xN_mapping(self):
+        import numpy as np
+        from kimore_adapter import _map_arrays
+
+        data = {"L_ANK_x": np.array([[1.0, 2.0, 3.0]])}
+        out = _map_arrays(data)
+        self.assertEqual(out["left_ankle"]["x"], [1.0, 2.0, 3.0])
+
+    def test_numpy_arbitrary_2d_not_flattened(self):
+        import numpy as np
+        from kimore_adapter import _map_arrays
+
+        data = {"L_SHO_x": np.zeros((4, 4))}
+        out = _map_arrays(data)
+        self.assertIsNone(out)  # schema not recognized; not flattened
 
 
 if __name__ == "__main__":

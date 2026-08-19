@@ -110,7 +110,21 @@ def subject_disjoint_split(
     subject_key) appears in exactly one fold. A fixed seed makes the split
     reproducible. When ``stratify_by="group"``, subjects are stratified by
     ``dataset_group`` before assignment.
+
+    Fraction validation: ``0 <= test_frac < 1``, ``0 <= val_frac < 1``, and
+    ``test_frac + val_frac < 1``. NaN/Inf fractions are rejected. This is
+    reproducibility hardening only — no ML is trained.
     """
+    import math
+
+    for name, frac in (("test_frac", test_frac), ("val_frac", val_frac)):
+        if not math.isfinite(frac):
+            raise ValueError(f"{name} must be finite (got {frac!r})")
+        if not (0.0 <= frac < 1.0):
+            raise ValueError(f"{name} must be in [0, 1) (got {frac!r})")
+    if test_frac + val_frac >= 1.0:
+        raise ValueError("test_frac + val_frac must be < 1")
+
     entries = [ManifestEntry(**{k: e[k] for k in (
         "dataset_group", "dataset_subject_key", "exercise", "sequence_key",
         "n_frames", "sampling_rate_hz",
