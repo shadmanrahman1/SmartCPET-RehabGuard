@@ -67,9 +67,38 @@ source-video timeline helper (never `frame_count + 1`), and results carry the
 same `timing_model` metadata. If video FPS metadata is invalid, an explicit
 `--fps` override is required. Values are measured — never fabricated.
 
+## Sprint B — evaluation & reproducibility tooling
+
+The tools below are offline, synthetic-fixture-safe, and never download a
+dataset or launch a camera automatically. Provenance is never mixed; no
+clinical score is produced. Full narrative in `docs/biogait-sprint-b-evaluation.md`
+and claim boundaries in `docs/biogait-claim-matrix.md`.
+
+- `common.py` — opaque keys, atomic `allow_nan=False` JSON, frame conversion.
+- `environment_report.py` — neutral non-identifying environment report.
+- `kimore_adapter.py` — local-only KIMORE adapter (`--inspect`, `--load`,
+  `--synthetic`); real `KIMORE_DATASET_ROOT` validation is PENDING.
+- `experiment_manifest.py` — reproducible enumeration + subject-disjoint split.
+- `evaluate_kimore_ex5.py` — source-skeleton evaluator of the source-aligned
+  kinematics (`--synthetic` or `--manifest`).
+- `kimore_mapping_report.py` — paper/source discrepancy report (JSON + Markdown).
+- `fps_sensitivity.py` — sampling-rate sensitivity (30 Hz = REFERENCE anchor).
+- `missingness_sensitivity.py` — controlled missing-data robustness.
+- `landmark_robustness.py` — feature-loss availability matrix.
+- `batch_analyze.py` — batch wrapper around `analyze_video.py`.
+- `benchmark_batch.py` — multi-video runtime benchmark summary.
+- `aggregate_results.py` — provenance-separated aggregation (JSON + CSV).
+- `make_paper_tables.py` / `make_paper_figures.py` — data-gated paper artifacts
+  (figures need matplotlib; PENDING_DATA otherwise).
+- `smoke_runtime.py` — bounded real-runtime smoke test (`--video` / `--camera`).
+- `results/` — policy: raw data/video/paths/names are never committed; only
+  `README.md` + `evaluation_status.json` are tracked.
+
 ## Notes
 
 - No secrets, no participant identifiers, and no private biomedical
   recordings should ever be placed under `experiments/`.
 - Benchmark/analysis outputs should not be committed unless they are part of
   a documented, consented experiment.
+- Requires `requirements-evaluation.txt` for the optional matplotlib figure
+  generator; the unit tests need only `biogait/requirements-tests.txt`.
