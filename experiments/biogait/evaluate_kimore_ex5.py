@@ -70,6 +70,19 @@ CONTROL_FACTOR_COVERAGE_KEYS = (
     "torso_area_m2",
 )
 
+VALID_DATA_ORIGINS = {
+    "SYNTHETIC_FIXTURE",
+    "REAL_KIMORE_NATIVE_SKELETON",
+    "REAL_VIDEO_MEDIAPIPE",
+    "UNKNOWN_UNVALIDATED",
+}
+
+
+def _clean_origin(value) -> str:
+    if value in VALID_DATA_ORIGINS:
+        return value
+    return "UNKNOWN_UNVALIDATED"
+
 
 def _range_deg(values: list[Optional[float]]) -> Optional[float]:
     finite = [v for v in values if v is not None and math.isfinite(v)]
@@ -152,7 +165,7 @@ def evaluate_sequence(
             "dataset_group": seq.get("dataset_group"),
             "dataset_subject_key": seq.get("dataset_subject_key"),
             "sequence_key": seq.get("sequence_key"),
-            "data_origin": data_origin or seq.get("data_origin") or "UNKNOWN_UNVALIDATED",
+            "data_origin": _clean_origin(data_origin or seq.get("data_origin")),
             "n_frames": n_frames,
             "sampling_rate_hz": round(fs, 4) if fs is not None else None,
             "sampling_rate_status": (
@@ -220,7 +233,7 @@ def evaluate_sequence(
         "dataset_group": seq.get("dataset_group"),
         "dataset_subject_key": seq.get("dataset_subject_key"),
         "sequence_key": seq.get("sequence_key"),
-        "data_origin": data_origin or seq.get("data_origin") or "UNKNOWN_UNVALIDATED",
+        "data_origin": _clean_origin(data_origin or seq.get("data_origin")),
         "execution_status": "COMPLETE" if n_frames else "NO_JOINT_FRAMES",
         "sampling_rate_hz": round(fs, 4) if fs is not None else None,
         "sampling_rate_status": sampling_rate_status,
@@ -341,10 +354,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                 "(no 'joints' payload found); provide --load or --sequence-json"
             )
             return 1
-        origin = ("REAL_KIMORE_NATIVE_SKELETON"
-                  if any(str(s.get("data_origin", "")).startswith("REAL_") for s in sequences)
-                  else "UNKNOWN_UNVALIDATED")
-        results = evaluate_sequences(sequences, fs_override=args.fs, data_origin=origin, limit=args.limit)
+        # Per-sequence origin: each result keeps its OWN sequence data_origin
+        # (or UNKNOWN_UNVALIDATED). One sequence being REAL must never upgrade
+        # another UNKNOWN/SYNTHETIC sequence to REAL.
+        results = evaluate_sequences(sequences, fs_override=args.fs, limit=args.limit)
     else:
         print("[evaluate_kimore_ex5] provide --synthetic, --load, --sequence-json, or --manifest")
         return 1

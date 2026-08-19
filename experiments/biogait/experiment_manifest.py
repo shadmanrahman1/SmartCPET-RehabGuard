@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 import sys
 from dataclasses import dataclass, field
@@ -96,6 +97,42 @@ def save_manifest(manifest: dict, path: Path) -> None:
     atomic_json_write(path, manifest)
 
 
+def _group_proportional_counts(group_size: int, target: dict, total: int) -> dict:
+    """Per-group fold counts proportional to the global target counts."""
+    scaled = {k: group_size * float(target[k]) / float(total) for k in target}
+    counts = {k: int(math.floor(scaled[k])) for k in target}
+    remain = group_size - sum(counts.values())
+    order = sorted(target, key=lambda k: (-target[k]))
+    i = 0
+    while remain > 0:
+        counts[order[i % len(order)]] += 1
+        i += 1
+        remain -= 1
+    return counts
+
+
+def _stratified_allocate(groups: dict, target: dict, total: int):
+    """Actual subject-level group-stratified allocation (deterministic).
+
+    Each group's subjects (already seeded-shuffled) are allocated to folds in
+    proportion to the global target counts, so sufficiently large groups are
+    distributed across train/val/test. Tiny groups may land entirely in one
+    fold (handled deterministically and documented). Subject-disjoint by
+    construction: a subject belongs to exactly one fold.
+    """
+    folders = {"train": [], "val": [], "test": []}
+    fill_order = ("train", "val", "test")
+    for g in sorted(groups.keys()):
+        group_subjects = groups[g]
+        counts = _group_proportional_counts(len(group_subjects), target, total)
+        idx = 0
+        for fold in fill_order:
+            take = counts[fold]
+            folders[fold].extend(group_subjects[idx:idx + take])
+            idx += take
+    return folders["train"], folders["val"], folders["test"]
+
+
 def subject_disjoint_split(
     manifest: dict,
     *,
@@ -108,15 +145,22 @@ def subject_disjoint_split(
 
     Splits by SUBJECT, never by individual frames: a subject (group,
     subject_key) appears in exactly one fold. A fixed seed makes the split
-    reproducible. When ``stratify_by="group"``, subjects are stratified by
-    ``dataset_group`` before assignment.
+    reproducible.
+
+    When ``stratify_by="group"``, a TRUE subject-level group-stratified
+    allocation is used: each group's subjects are seeded-shuffled and then
+    allocated to train/val/test in proportion to the global target counts, so
+    each sufficiently large group is represented in every fold. Tiny groups
+    (smaller than a fold's proportional share) may land entirely in one fold;
+    this is a documented, deterministic boundary. No frame-level leakage
+    occurs.
+
+    Without ``stratify_by``, a simple global seeded shuffle is used.
 
     Fraction validation: ``0 <= test_frac < 1``, ``0 <= val_frac < 1``, and
     ``test_frac + val_frac < 1``. NaN/Inf fractions are rejected. This is
     reproducibility hardening only — no ML is trained.
     """
-    import math
-
     for name, frac in (("test_frac", test_frac), ("val_frac", val_frac)):
         if not math.isfinite(frac):
             raise ValueError(f"{name} must be finite (got {frac!r})")
@@ -135,31 +179,30 @@ def subject_disjoint_split(
         subjects.setdefault(e.subject_key(), []).append(e)
 
     subjects_list = list(subjects.keys())
-
     rng = random.Random(int(seed))
-    if stratify_by == "group":
-        groups: dict[str, list] = {}
-        for sk in subjects_list:
-            groups.setdefault(sk[0], []).append(sk)
-        ordered: list = []
-        for g in sorted(groups.keys()):
-            shuffled = groups[g]
-            rng.shuffle(shuffled)
-            ordered.extend(shuffled)
-    else:
-        ordered = subjects_list
-        rng.shuffle(ordered)
 
-    n = len(ordered)
+    groups: dict[str, list] = {}
+    for sk in subjects_list:
+        groups.setdefault(sk[0], []).append(sk)
+    for g in groups:
+        rng.shuffle(groups[g])
+
+    n = len(subjects_list)
     n_test = int(round(n * test_frac))
     n_val = int(round(n * val_frac))
     n_train = n - n_test - n_val
     if n_train <= 0:
         raise ValueError("test_frac + val_frac leave no training subjects")
+    target = {"train": n_train, "val": n_val, "test": n_test}
 
-    train_subjects = ordered[:n_train]
-    val_subjects = ordered[n_train:n_train + n_val]
-    test_subjects = ordered[n_train + n_val:]
+    if stratify_by == "group":
+        train_subjects, val_subjects, test_subjects = _stratified_allocate(groups, target, n)
+    else:
+        ordered = subjects_list
+        rng.shuffle(ordered)
+        train_subjects = ordered[:n_train]
+        val_subjects = ordered[n_train:n_train + n_val]
+        test_subjects = ordered[n_train + n_val:]
 
     def _fold(subject_list) -> list[dict]:
         out = []

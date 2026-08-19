@@ -53,8 +53,11 @@ def _resolve_sources(input_dir: Optional[Path], manifest: Optional[Path]) -> lis
         for ext in VIDEO_EXTENSIONS:
             for f in sorted(glob.glob(str(Path(input_dir) / f"**/*{ext}"), recursive=True)):
                 p = Path(f)
+                # Hash the RELATIVE locator internally to reduce collisions; only
+                # the opaque key is persisted. No raw/local path is kept.
+                rel = p.relative_to(input_dir)
                 sources.append(
-                    {"video": p, "sequence_key": opaque_key(p.name)}
+                    {"video": p, "sequence_key": opaque_key(str(rel))}
                 )
         return sources
     raise ValueError("provide --input-dir or --manifest")
@@ -67,7 +70,7 @@ def _analyze_video_module():
     return _av
 
 
-def _process_one(av, video: Path, out_json: Path, model, fps_override) -> dict:
+def _process_one(av, video: Path, out_json: Path, sequence_key: str, model, fps_override) -> dict:
     export = av.analyze_video(
         video,
         out_json,
@@ -76,7 +79,7 @@ def _process_one(av, video: Path, out_json: Path, model, fps_override) -> dict:
     )
     atomic_json_write(out_json, export)
     return {
-        "sequence_key": opaque_key(video.name),
+        "sequence_key": sequence_key,
         "data_origin": "REAL_VIDEO_MEDIAPIPE",
         "status": "ok",
         "output_file": out_json.name,
@@ -103,7 +106,7 @@ def run_batch(
         seq_key = source["sequence_key"]
         out_json = output_dir / f"{seq_key}.json"
         try:
-            running.append(_process_one(av, video, out_json, model, fps_override))
+            running.append(_process_one(av, video, out_json, seq_key, model, fps_override))
         except Exception as exc:  # noqa: BLE001 - batch robustness boundary
             running.append(
                 {
