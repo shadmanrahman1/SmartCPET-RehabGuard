@@ -21,6 +21,13 @@ numpy>=1.24,<3.0
 # verified-working pin.
 scipy>=1.9,<2.0
 
+# python-dotenv is used to safely load the SCRIPTS BIOGAIT CONFIG FILE
+# `<repo-root>/.env` for the optional OpenRouter bounded explainer.
+# This is a conservative lower-bound range, not a verified-working pin.
+# The loader is a safe no-op when python-dotenv is absent or the file is
+# missing; process environment variables always take precedence (override=False).
+python-dotenv>=1.0,<2.0
+
 # ── Primary runtime (Qt desktop) ──────────────────────────────────────────────
 PyQt5>=5.15,<6.0
 

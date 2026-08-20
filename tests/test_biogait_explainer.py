@@ -8,12 +8,33 @@ explanation cache.
 """
 from __future__ import annotations
 
+import importlib.machinery
 import json
+import os
 import sys
+import types
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "biogait"))
+
+# Isolate these OpenRouter tests from the user's real private root `.env`
+# (and from any ambient environment config). Tests MUST NOT use the real API
+# key or real config. We clear the relevant vars and stub `dotenv` so the
+# loader in openrouter_explainer is a deterministic no-op.
+for _k in [
+    "OPENROUTER_API_KEY",
+    "BIOGAIT_EXPLAINER_MODE",
+    "BIOGAIT_OPENROUTER_MODEL",
+    "BIOGAIT_OPENROUTER_BASE_URL",
+]:
+    os.environ.pop(_k, None)
+_dotenv_stub = types.ModuleType("dotenv")
+_dotenv_stub.__spec__ = importlib.machinery.ModuleSpec("dotenv", loader=None)
+def _noop(*_a, **_k):
+    return False
+_dotenv_stub.load_dotenv = _noop
+sys.modules["dotenv"] = _dotenv_stub
 
 from explanation_schema import build_input, evidence_digest  # noqa: E402
 from evidence_explainer import template_explain  # noqa: E402

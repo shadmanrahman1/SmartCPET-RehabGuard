@@ -15,6 +15,11 @@ Configuration (environment variables ONLY; no committed secrets):
                                model; NOT hard-coded to MedGemma)
   BIOGAIT_OPENROUTER_BASE_URL  optional; default https://openrouter.ai/api/v1
 
+On import, BioGait also safely attempts to load the SCRIPTS BIOGAIT CONFIG FILE
+`<repo-root>/.env` with `override=False` (process environment wins). This is the
+ONLY `.env` consulted here — `.env.example`, `.env.local`, or arbitrary parent
+directories are NEVER consulted.
+
 Policy:
 - The remote model receives ONLY whitelisted structured evidence (never raw
   video/frames/paths/identity/credentials).
@@ -36,6 +41,7 @@ import os
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
 
@@ -54,6 +60,35 @@ ENV_API_KEY = "OPENROUTER_API_KEY"
 ENV_MODEL = "BIOGAIT_OPENROUTER_MODEL"
 ENV_BASE_URL = "BIOGAIT_OPENROUTER_BASE_URL"
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
+
+
+def _load_repo_dotenv() -> None:
+    """Safely load the SCRIPTS BIOGAIT CONFIG FILE <repo-root>/.env at import time.
+
+    Deterministic path. Uses ``override=False`` so existing process environment
+    wins. Silent no-op when python-dotenv is missing or the file is absent.
+    The loader reads ONLY the deterministic repo-root ``.env``; it does not
+    search arbitrary parent directories and does not read sample or alternate
+    files. NEVER prints, echoes, logs, or persists the API key.
+
+    The CPET environment loads its own configuration separately and is not
+    touched here.
+    """
+    repo_root = Path(__file__).resolve().parents[1]
+    env_path = repo_root / ".env"
+    try:
+        from dotenv import load_dotenv
+    except Exception:
+        return
+    try:
+        load_dotenv(str(env_path), override=False)
+    except Exception:
+        # Swallow any dotenv error silently; missing/malformed .env is not fatal.
+        return
+
+
+# Run the loader once at import. It is a safe, idempotent, no-op if anything fails.
+_load_repo_dotenv()
 
 VALID_MODES = ("disabled", "template", "openrouter")
 
